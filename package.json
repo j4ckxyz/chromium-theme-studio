@@ -1,0 +1,12 @@
+{
+  "name": "theme-gen",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "bun run generate.ts"
+  },
+  "dependencies": {
+    "picocolors": "^1.1.1"
+  }
+}
