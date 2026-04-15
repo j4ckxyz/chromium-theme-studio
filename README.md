@@ -69,6 +69,24 @@ bun run generate.ts --from "./sunset-ember" --web-store
 bun run generate.ts --from "./sunset-ember/manifest.json" --name "Sunset Ember"
 ```
 
+Generate multiple candidates in one run:
+
+```bash
+bun run generate.ts --variations 6 "coastal dawn with teal water and peach clouds"
+```
+
+Create an HTML side-by-side preview sheet:
+
+```bash
+bun run generate.ts --variations 6 --preview-sheet "coastal dawn with teal water and peach clouds"
+```
+
+Capture listing screenshots for each generated theme (macOS):
+
+```bash
+bun run generate.ts --web-store --screenshots "coastal dawn with teal water and peach clouds"
+```
+
 Optional reasoning mode:
 
 ```bash
@@ -81,6 +99,9 @@ Supported `--thinking` values: `xhigh`, `high`, `medium`, `low`, `minimal`, `non
 - Use `--thinking=<level>` for reasoning-capable models.
 - Use `--thinking=off` (or omit the flag) for non-reasoning mode.
 - If reasoning is requested but rejected by the model/provider, the CLI automatically retries without reasoning.
+- Use `--variations` (or `-v`) to create 1-12 distinct candidates from one prompt.
+- Use `--preview-sheet` to write an HTML comparison page under `previews/`.
+- Use `--screenshots` to capture `new-tab`, `tabs-loaded`, and `toolbar-state` screenshots (macOS only; requires Chromium/Chrome not already running).
 - Use `--name` (or `-n`) to override the generated theme name used for output folder/zip naming.
 - Use `--image` (or `-i`) with local paths or web URLs when using a vision-capable model.
 - Non-standard image formats are converted to PNG automatically using `ffmpeg` (fallback to `sips` on macOS).
@@ -101,6 +122,9 @@ bun run generate.ts "deep forest, muted greens and browns"
 - Streams model reasoning to the terminal in dim grey with `🤔` prefix
 - Accumulates JSON output silently, then validates the manifest
 - Optionally sends attached reference images to compatible models for visual color inspiration
+- Can generate multiple variations in one invocation and auto-label each theme
+- Can output an HTML side-by-side preview sheet for fast candidate review
+- Can capture publish-ready screenshots for CWS listing flow (macOS)
 - Writes `manifest.json` to a slugified folder named after the generated theme
 - Creates a ready-to-upload Chrome Web Store zip (`<theme-name>-webstore.zip`) containing manifest + icon assets
 - With `--web-store`, creates `icon-128.png`, `descriptions/<theme-name>.md`, and `descriptions/<theme-name>.json`

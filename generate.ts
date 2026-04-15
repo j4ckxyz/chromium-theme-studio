@@ -88,6 +88,9 @@ type CliOptions = {
   thinking: ThinkingConfig | null;
   nameOverride: string | null;
   imageSources: string[];
+  variations: number;
+  previewSheet: boolean;
+  screenshots: boolean;
   webStore: boolean;
   fromPath: string | null;
   help: boolean;
@@ -97,6 +100,33 @@ type PreparedReferenceImage = {
   source: string;
   url: string;
   format: string;
+};
+
+type ImageReferenceOutcome = {
+  requestedCount: number;
+  status: "not requested" | "requested" | "prepared" | "used" | "fallback" | "ignored";
+  detail: string;
+};
+
+type ScreenshotArtifacts = {
+  newTab: string;
+  tabsLoaded: string;
+  toolbar: string;
+};
+
+type ThemeProcessingResult = {
+  manifest: ThemeManifest;
+  failedChecks: ContrastCheck[];
+  stream: StreamThemeResult | null;
+  outputDir: string;
+  manifestPath: string;
+  webStoreZipPath: string;
+  iconPath: string | null;
+  descriptionPath: string | null;
+  metadataPath: string | null;
+  screenshots: ScreenshotArtifacts | null;
+  imageReference: ImageReferenceOutcome;
+  fromExisting: boolean;
 };
 
 type ChatUsage = {
@@ -273,8 +303,12 @@ const THINKING_FLAG_PREFIX = "--thinking=";
 const NAME_FLAG_PREFIX = "--name=";
 const FROM_FLAG_PREFIX = "--from=";
 const IMAGE_FLAG_PREFIX = "--image=";
+const VARIATIONS_FLAG_PREFIX = "--variations=";
+
+const MAX_VARIATIONS = 12;
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const PREVIEW_MAX_PROMPT_LENGTH = 80;
 
 const EXTENSION_TO_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -332,10 +366,14 @@ function usage(exitCode = 1): never {
   printer("  -h, --help              Show this help message");
   printer("  -n, --name <name>       Set an explicit theme/package name");
   printer("  -i, --image <path/url>  Add image reference for palette inspiration");
+  printer("  -v, --variations <n>    Generate multiple theme variations (1-12)");
+  printer("      --preview-sheet     Generate HTML preview for variation runs");
+  printer("      --screenshots       Capture listing screenshots (requires Chromium)");
   printer("  -w, --web-store         Generate CWS-ready icon and listing drafts");
   printer("  -f, --from <path>       Re-process an existing theme manifest/folder");
   printer("      --name=<name>       Same as --name");
   printer("      --image=<path/url>  Same as --image (repeatable)");
+  printer("      --variations=<n>    Same as --variations");
   printer("      --from=<path>       Same as --from");
   printer("      --thinking=<level>  Enable model reasoning effort");
   printer("      --thinking [level]  Same as --thinking=<level>");
@@ -366,11 +404,22 @@ function parseThinkingValue(raw: string | undefined): ThinkingConfig | null {
   throw new Error(`Invalid thinking level: ${raw}`);
 }
 
+function parseVariationsValue(raw: string | undefined): number {
+  const value = Number.parseInt((raw ?? "").trim(), 10);
+  if (!Number.isInteger(value) || value < 1 || value > MAX_VARIATIONS) {
+    throw new Error(`--variations must be an integer between 1 and ${MAX_VARIATIONS}`);
+  }
+  return value;
+}
+
 function parseCliOptions(argv: string[]): CliOptions {
   const promptParts: string[] = [];
   let thinking: ThinkingConfig | null = null;
   let nameOverride: string | null = null;
   const imageSources: string[] = [];
+  let variations = 1;
+  let previewSheet = false;
+  let screenshots = false;
   let webStore = false;
   let fromPath: string | null = null;
 
@@ -383,10 +432,38 @@ function parseCliOptions(argv: string[]): CliOptions {
         thinking,
         nameOverride,
         imageSources,
+        variations,
+        previewSheet,
+        screenshots,
         webStore,
         fromPath,
         help: true,
       };
+    }
+
+    if (arg === "--preview-sheet") {
+      previewSheet = true;
+      continue;
+    }
+
+    if (arg === "--screenshots") {
+      screenshots = true;
+      continue;
+    }
+
+    if (arg.startsWith(VARIATIONS_FLAG_PREFIX)) {
+      variations = parseVariationsValue(arg.slice(VARIATIONS_FLAG_PREFIX.length));
+      continue;
+    }
+
+    if (arg === "--variations" || arg === "-v") {
+      const next = argv[i + 1];
+      if (typeof next !== "string" || next.startsWith("-")) {
+        throw new Error("--variations requires a value");
+      }
+      variations = parseVariationsValue(next);
+      i += 1;
+      continue;
     }
 
     if (arg === "-w" || arg === "--web-store") {
@@ -489,6 +566,9 @@ function parseCliOptions(argv: string[]): CliOptions {
     thinking,
     nameOverride,
     imageSources,
+    variations,
+    previewSheet,
+    screenshots,
     webStore,
     fromPath,
     help: false,
@@ -1393,6 +1473,519 @@ async function writeWebStoreDescriptionFiles(
   return { descriptionPath, metadataPath };
 }
 
+function buildVariationPrompt(basePrompt: string, index: number, total: number): string {
+  if (total <= 1) {
+    return basePrompt;
+  }
+
+  return `${basePrompt}\n\nVariation instruction: This is candidate ${index} of ${total}. Keep the same overall mood and intent, but make this palette clearly distinct from likely sibling variations.`;
+}
+
+function createImageReferenceOutcome(requestedCount: number): ImageReferenceOutcome {
+  return {
+    requestedCount,
+    status: requestedCount > 0 ? "requested" : "not requested",
+    detail: "",
+  };
+}
+
+async function generateManifestFromPrompt(options: {
+  prompt: string;
+  variationIndex: number;
+  variationCount: number;
+  configuredThinking: ThinkingConfig | null;
+  modePreference: ModePreference;
+  nameOverride: string | null;
+  preparedReferences: PreparedReferenceImage[];
+}): Promise<{ manifest: ThemeManifest; failedChecks: ContrastCheck[]; stream: StreamThemeResult }> {
+  const { prompt, variationIndex, variationCount, configuredThinking, modePreference, nameOverride, preparedReferences } =
+    options;
+
+  const promptForVariation = buildVariationPrompt(prompt, variationIndex, variationCount);
+  let retryFailedPairs: string[] = [];
+  let bestResult:
+    | {
+        manifest: ThemeManifest;
+        checks: ContrastCheck[];
+        stream: StreamThemeResult;
+      }
+    | undefined;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+    if (attempt > 0) {
+      console.log(pc.yellow(`Retrying generation (${attempt}/${MAX_RETRIES})...`));
+    }
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: SYSTEM_PROMPT },
+      {
+        role: "user",
+        content:
+          preparedReferences.length > 0
+            ? [
+                {
+                  type: "text",
+                  text: buildUserMessage(promptForVariation, retryFailedPairs, modePreference, preparedReferences),
+                },
+                ...preparedReferences.map((reference) => ({
+                  type: "image_url" as const,
+                  image_url: {
+                    url: reference.url,
+                  },
+                })),
+              ]
+            : buildUserMessage(promptForVariation, retryFailedPairs, modePreference, preparedReferences),
+      },
+    ];
+
+    const stream = await streamThemeManifest(messages, configuredThinking, preparedReferences.length > 0);
+    const rawManifest = stream.rawManifest;
+
+    let parsedManifest: unknown;
+    try {
+      parsedManifest = JSON.parse(rawManifest);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to parse generated JSON: ${message}\nRaw output:\n${rawManifest}`);
+    }
+
+    const validationErrors = validateManifest(parsedManifest);
+    if (validationErrors.length > 0) {
+      throw new Error(`Validation failed: ${validationErrors.join("; ")}`);
+    }
+
+    const manifest = parsedManifest as ThemeManifest;
+    const baseName = nameOverride ?? normalizeGeneratedName(manifest.name);
+    manifest.name = variationCount > 1 ? `${baseName} ${variationIndex}` : baseName;
+
+    const checks = runContrastChecks(manifest);
+    const failedChecks = checks.filter((check) => !check.pass);
+
+    printContrastTable(checks);
+
+    if (!bestResult || failedChecks.length < bestResult.checks.filter((check) => !check.pass).length) {
+      bestResult = { manifest, checks, stream };
+    }
+
+    if (failedChecks.length <= 2) {
+      break;
+    }
+
+    if (attempt < MAX_RETRIES) {
+      retryFailedPairs = failedChecks.map((check) => check.label);
+      console.log(
+        pc.yellow(
+          `More than 2 contrast checks failed (${failedChecks.length}). Requesting an accessibility-focused retry.`,
+        ),
+      );
+    }
+  }
+
+  if (!bestResult) {
+    throw new Error("No valid theme manifest was produced.");
+  }
+
+  return {
+    manifest: bestResult.manifest,
+    failedChecks: bestResult.checks.filter((check) => !check.pass),
+    stream: bestResult.stream,
+  };
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureUniqueOutputDir(baseDir: string): Promise<string> {
+  if (!(await pathExists(baseDir))) {
+    return baseDir;
+  }
+
+  let suffix = 2;
+  while (true) {
+    const candidate = `${baseDir}-${suffix}`;
+    if (!(await pathExists(candidate))) {
+      return candidate;
+    }
+    suffix += 1;
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function toSwatchCell(role: string, color: string): string {
+  return `<div class="swatch-row"><span class="swatch" style="background:${escapeHtml(color)}"></span><span>${escapeHtml(role)}: ${escapeHtml(color)}</span></div>`;
+}
+
+async function writePreviewSheet(results: ThemeProcessingResult[], prompt: string): Promise<string> {
+  const previewsDir = path.join(process.cwd(), "previews");
+  await fs.mkdir(previewsDir, { recursive: true });
+
+  const sheetName = `${slugify(`preview-${prompt.slice(0, 50) || "themes"}`)}-${Date.now()}.html`;
+  const previewPath = path.join(previewsDir, sheetName);
+
+  const cards = results
+    .map((result, index) => {
+      const colors = result.manifest.theme.colors;
+      const swatches = [
+        ["frame", rgbToHex(colors.frame)],
+        ["toolbar", rgbToHex(colors.toolbar)],
+        ["ntp_background", rgbToHex(colors.ntp_background)],
+        ["tab_text", rgbToHex(colors.tab_text)],
+        ["ntp_link", rgbToHex(colors.ntp_link)],
+      ]
+        .map(([role, color]) => toSwatchCell(role, color))
+        .join("");
+
+      const failedSummary =
+        result.failedChecks.length > 0
+          ? `<span class="warn">${result.failedChecks.length} failed checks</span>`
+          : `<span class="ok">all checks passed</span>`;
+
+      const screenshotList = result.screenshots
+        ? `<div class="meta">screenshots:<br>${escapeHtml(relativePathFromCwd(result.screenshots.newTab))}<br>${escapeHtml(relativePathFromCwd(result.screenshots.tabsLoaded))}<br>${escapeHtml(relativePathFromCwd(result.screenshots.toolbar))}</div>`
+        : "";
+
+      return `<article class="card">
+  <h2>${index + 1}. ${escapeHtml(result.manifest.name)}</h2>
+  <div class="meta">manifest: ${escapeHtml(relativePathFromCwd(result.manifestPath))}</div>
+  <div class="meta">zip: ${escapeHtml(relativePathFromCwd(result.webStoreZipPath))}</div>
+  <div class="meta">image refs: ${escapeHtml(result.imageReference.status)}${result.imageReference.detail ? ` - ${escapeHtml(result.imageReference.detail)}` : ""}</div>
+  <div class="meta">contrast: ${failedSummary}</div>
+  <div class="swatches">${swatches}</div>
+  ${screenshotList}
+</article>`;
+    })
+    .join("\n");
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Theme Variations Preview</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font-family: "Avenir Next", "Segoe UI", sans-serif; background: #101217; color: #eef1f6; }
+    header { padding: 24px; border-bottom: 1px solid #2a2f3d; background: linear-gradient(135deg, #1f2b4a, #1a1f2c); }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    .subtitle { margin: 0; opacity: 0.8; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; padding: 20px; }
+    .card { background: #161b26; border: 1px solid #2a3246; border-radius: 12px; padding: 14px; }
+    .card h2 { margin: 0 0 8px; font-size: 16px; }
+    .meta { font-size: 12px; opacity: 0.9; margin: 4px 0; word-break: break-word; }
+    .swatches { display: grid; gap: 6px; margin-top: 10px; }
+    .swatch-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .swatch { width: 24px; height: 24px; border-radius: 6px; border: 1px solid #ffffff33; flex-shrink: 0; }
+    .ok { color: #7ff2b2; }
+    .warn { color: #ffd086; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Theme Variations Preview</h1>
+    <p class="subtitle">Prompt: ${escapeHtml(prompt)}</p>
+  </header>
+  <main class="grid">${cards}</main>
+</body>
+</html>`;
+
+  await Bun.write(previewPath, `${html}\n`);
+  return previewPath;
+}
+
+function trimPromptForPreview(prompt: string): string {
+  const clean = prompt.trim();
+  if (clean.length <= PREVIEW_MAX_PROMPT_LENGTH) {
+    return clean;
+  }
+  return `${clean.slice(0, PREVIEW_MAX_PROMPT_LENGTH - 3)}...`;
+}
+
+async function waitMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runCommand(args: string[], cwd?: string): Promise<string> {
+  const proc = Bun.spawn(args, {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const exitCode = await proc.exited;
+  const stdout = (await new Response(proc.stdout).text()).trim();
+  const stderr = (await new Response(proc.stderr).text()).trim();
+  if (exitCode !== 0) {
+    throw new Error(`${args[0]} failed (${exitCode}): ${stderr || stdout || "no output"}`);
+  }
+  return stdout;
+}
+
+async function runAppleScript(script: string): Promise<string> {
+  return runCommand(["osascript", "-e", script]);
+}
+
+type BrowserCandidate = {
+  appName: string;
+  executablePath: string;
+};
+
+const BROWSER_CANDIDATES: BrowserCandidate[] = [
+  {
+    appName: "Chromium",
+    executablePath: "/Applications/Chromium.app/Contents/MacOS/Chromium",
+  },
+  {
+    appName: "Google Chrome",
+    executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  },
+];
+
+async function isAppRunning(appName: string): Promise<boolean> {
+  try {
+    const result = await runAppleScript(`tell application "System Events" to return (name of processes) contains "${appName}"`);
+    return result.trim().toLowerCase() === "true";
+  } catch {
+    return false;
+  }
+}
+
+async function findScreenshotBrowserCandidate(): Promise<BrowserCandidate | null> {
+  for (const candidate of BROWSER_CANDIDATES) {
+    if (!(await pathExists(candidate.executablePath))) {
+      continue;
+    }
+
+    if (await isAppRunning(candidate.appName)) {
+      continue;
+    }
+
+    return candidate;
+  }
+
+  return null;
+}
+
+async function generateScreenshotsForTheme(themeDir: string): Promise<ScreenshotArtifacts | null> {
+  if (process.platform !== "darwin") {
+    console.log(pc.yellow("Screenshot helper currently supports macOS only. Skipping screenshots."));
+    return null;
+  }
+
+  const browser = await findScreenshotBrowserCandidate();
+  if (!browser) {
+    console.log(pc.yellow("No idle Chromium/Chrome app found for screenshots. Close open browser windows and retry."));
+    return null;
+  }
+
+  const screenshotDir = path.join(themeDir, "screenshots");
+  const profileDir = path.join(os.tmpdir(), `chromium-theme-screens-${randomUUID()}`);
+  await fs.mkdir(screenshotDir, { recursive: true });
+  await fs.mkdir(profileDir, { recursive: true });
+
+  const bounds = { left: 80, top: 80, width: 1280, height: 840 };
+  const right = bounds.left + bounds.width;
+  const bottom = bounds.top + bounds.height;
+
+  const newTab = path.join(screenshotDir, "new-tab.png");
+  const tabsLoaded = path.join(screenshotDir, "tabs-loaded.png");
+  const toolbar = path.join(screenshotDir, "toolbar-state.png");
+
+  try {
+    await runCommand([
+      "open",
+      "-a",
+      browser.appName,
+      "--args",
+      `--user-data-dir=${profileDir}`,
+      `--disable-extensions-except=${themeDir}`,
+      `--load-extension=${themeDir}`,
+      "--new-window",
+      "chrome://newtab",
+    ]);
+
+    await waitMs(2500);
+    await runAppleScript(`tell application "${browser.appName}" to activate`);
+    await runAppleScript(`tell application "${browser.appName}" to if (count of windows) > 0 then set bounds of front window to {${bounds.left}, ${bounds.top}, ${right}, ${bottom}}`);
+    await waitMs(700);
+    await runCommand(["screencapture", "-x", `-R${bounds.left},${bounds.top},${bounds.width},${bounds.height}`, newTab]);
+
+    await runAppleScript(`tell application "${browser.appName}"
+      activate
+      if (count of windows) = 0 then make new window
+      set URL of active tab of front window to "https://example.com"
+      make new tab at end of tabs of front window with properties {URL:"https://www.wikipedia.org"}
+      make new tab at end of tabs of front window with properties {URL:"https://developer.chrome.com/docs/webstore"}
+      set active tab index of front window to 3
+    end tell`);
+    await waitMs(3500);
+    await runCommand(["screencapture", "-x", `-R${bounds.left},${bounds.top},${bounds.width},${bounds.height}`, tabsLoaded]);
+
+    await runAppleScript(`tell application "${browser.appName}" to if (count of windows) > 0 then set URL of active tab of front window to "chrome://settings/appearance"`);
+    await waitMs(1800);
+    await runCommand(["screencapture", "-x", `-R${bounds.left},${bounds.top},${bounds.width},${bounds.height}`, toolbar]);
+
+    await runAppleScript(`tell application "${browser.appName}" to quit`);
+    await fs.rm(profileDir, { recursive: true, force: true });
+
+    return {
+      newTab,
+      tabsLoaded,
+      toolbar,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(pc.yellow(`Screenshot helper failed: ${message}`));
+    try {
+      await runAppleScript(`tell application "${browser.appName}" to quit`);
+    } catch {
+      // ignore cleanup failure
+    }
+    await fs.rm(profileDir, { recursive: true, force: true });
+    return null;
+  }
+}
+
+async function writeThemeArtifacts(options: {
+  manifest: ThemeManifest;
+  failedChecks: ContrastCheck[];
+  stream: StreamThemeResult | null;
+  fromExisting: boolean;
+  outputDir: string;
+  manifestPath: string;
+  webStore: boolean;
+  screenshots: boolean;
+  imageReference: ImageReferenceOutcome;
+}): Promise<ThemeProcessingResult> {
+  const { manifest, failedChecks, stream, fromExisting, webStore, screenshots, imageReference } = options;
+
+  let outputDir = options.outputDir;
+  let manifestPath = options.manifestPath;
+
+  if (!fromExisting) {
+    const baseOutputDir = path.join(process.cwd(), slugify(manifest.name));
+    outputDir = await ensureUniqueOutputDir(baseOutputDir);
+    await fs.mkdir(outputDir, { recursive: true });
+    manifestPath = path.join(outputDir, "manifest.json");
+  }
+
+  let iconPath: string | null = null;
+  let iconStartHex: string | null = null;
+  let iconEndHex: string | null = null;
+
+  if (webStore) {
+    const gradientPair = selectGradientPair(manifest);
+    iconPath = path.join(outputDir, "icon-128.png");
+    iconStartHex = rgbToHex(gradientPair.start);
+    iconEndHex = rgbToHex(gradientPair.end);
+    await writeGradientIcon(iconPath, gradientPair.start, gradientPair.end, 128);
+    manifest.icons = {
+      ...(manifest.icons ?? {}),
+      "128": "icon-128.png",
+    };
+  }
+
+  await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const webStoreZipPath = path.join(process.cwd(), `${slugify(manifest.name)}-webstore.zip`);
+  await buildWebStorePackage(outputDir, webStoreZipPath, manifest);
+
+  let descriptionPath: string | null = null;
+  let metadataPath: string | null = null;
+  if (webStore && iconPath && iconStartHex && iconEndHex) {
+    const written = await writeWebStoreDescriptionFiles(
+      manifest,
+      slugify(manifest.name),
+      webStoreZipPath,
+      iconPath,
+      iconStartHex,
+      iconEndHex,
+    );
+    descriptionPath = written.descriptionPath;
+    metadataPath = written.metadataPath;
+  }
+
+  const screenshotArtifacts = screenshots ? await generateScreenshotsForTheme(outputDir) : null;
+
+  return {
+    manifest,
+    failedChecks,
+    stream,
+    outputDir,
+    manifestPath,
+    webStoreZipPath,
+    iconPath,
+    descriptionPath,
+    metadataPath,
+    screenshots: screenshotArtifacts,
+    imageReference,
+    fromExisting,
+  };
+}
+
+function printResultSummary(result: ThemeProcessingResult, totalResults: number, resultIndex: number): void {
+  const manifest = result.manifest;
+
+  if (totalResults > 1) {
+    console.log(pc.bold(pc.cyan(`\n=== Result ${resultIndex}/${totalResults}: ${manifest.name} ===`)));
+  }
+
+  console.log(
+    pc.green(result.fromExisting ? "Existing theme processed successfully." : "Theme manifest generated and validated successfully."),
+  );
+  console.log(pc.bold(pc.cyan(`Written: ${result.manifestPath}`)));
+  console.log(pc.bold(pc.cyan(`Web Store package: ${result.webStoreZipPath}`)));
+  console.log(
+    `Key colours: frame=${rgbToHex(manifest.theme.colors.frame)}, toolbar=${rgbToHex(
+      manifest.theme.colors.toolbar,
+    )}, ntp_background=${rgbToHex(manifest.theme.colors.ntp_background)}`,
+  );
+
+  if (result.iconPath) {
+    console.log(pc.bold(pc.cyan(`Icon: ${result.iconPath}`)));
+  }
+
+  if (result.descriptionPath && result.metadataPath) {
+    console.log(pc.bold(pc.cyan(`Listing draft: ${result.descriptionPath}`)));
+    console.log(pc.bold(pc.cyan(`Publish metadata: ${result.metadataPath}`)));
+  }
+
+  if (result.screenshots) {
+    console.log(pc.bold(pc.cyan(`Screenshot (new tab): ${result.screenshots.newTab}`)));
+    console.log(pc.bold(pc.cyan(`Screenshot (tabs): ${result.screenshots.tabsLoaded}`)));
+    console.log(pc.bold(pc.cyan(`Screenshot (toolbar): ${result.screenshots.toolbar}`)));
+  }
+
+  if (result.imageReference.requestedCount > 0) {
+    const statusLabel = result.imageReference.status === "used" ? pc.green("used") : pc.yellow("not used");
+    const detail = result.imageReference.detail || `${result.imageReference.requestedCount} reference image(s) were requested`;
+    console.log(`Image references: ${statusLabel} (${detail})`);
+  }
+
+  if (result.failedChecks.length > 0) {
+    const labels = result.failedChecks.map((check) => check.label).join(", ");
+    if (result.failedChecks.length > 2) {
+      console.log(pc.red(`Warning: theme written after ${MAX_RETRIES} retries with remaining contrast failures: ${labels}`));
+    } else {
+      console.log(pc.red(`Warning: theme written, but some contrast checks failed and legibility may be impacted: ${labels}`));
+    }
+  }
+
+  printColorSummary(manifest);
+}
+
 async function fetchGenerationMetadata(
   apiKey: string,
   generationId: string | null,
@@ -1755,8 +2348,12 @@ async function main(): Promise<void> {
   let cliThinking: ThinkingConfig | null = null;
   let cliNameOverride: string | null = null;
   let cliImageSources: string[] = [];
+  let cliVariations = 1;
+  let cliPreviewSheet = false;
+  let cliScreenshots = false;
   let cliWebStore = false;
   let cliFromPath: string | null = null;
+
   try {
     const parsed = parseCliOptions(Bun.argv.slice(2));
     if (parsed.help) {
@@ -1766,6 +2363,9 @@ async function main(): Promise<void> {
     cliThinking = parsed.thinking;
     cliNameOverride = parsed.nameOverride;
     cliImageSources = parsed.imageSources;
+    cliVariations = parsed.variations;
+    cliPreviewSheet = parsed.previewSheet;
+    cliScreenshots = parsed.screenshots;
     cliWebStore = parsed.webStore;
     cliFromPath = parsed.fromPath;
   } catch (error) {
@@ -1783,67 +2383,83 @@ async function main(): Promise<void> {
     usage();
   }
 
+  let variationCount = cliVariations;
+  if (cliFromPath && variationCount > 1) {
+    console.log(pc.yellow("--variations is ignored with --from; processing a single existing theme."));
+    variationCount = 1;
+  }
+
   const configuredThinking = cliThinking;
   const apiKey = process.env.OPENROUTER_API_KEY;
   const requestedImageCount = cliImageSources.length;
+  const sharedImageOutcome = createImageReferenceOutcome(requestedImageCount);
   let preparedReferences: PreparedReferenceImage[] = [];
-  let imageReferenceStatus = requestedImageCount > 0 ? "requested" : "not requested";
-  let imageReferenceDetail = "";
-  let manifest: ThemeManifest;
-  let failedChecks: ContrastCheck[] = [];
-  let bestStream: StreamThemeResult | null = null;
-  let outputDir = "";
-  let manifestPath = "";
-  let fromExisting = false;
+
+  const results: ThemeProcessingResult[] = [];
 
   if (cliFromPath) {
-    fromExisting = true;
     const resolved = await resolveExistingManifest(cliFromPath);
-    manifestPath = resolved.manifestPath;
-    outputDir = resolved.outputDir;
-    manifest = await loadManifestFromPath(manifestPath);
+    const manifest = await loadManifestFromPath(resolved.manifestPath);
 
     if (cliNameOverride) {
       manifest.name = cliNameOverride;
     }
 
+    const checks = runContrastChecks(manifest);
+    printContrastTable(checks);
+
+    const imageReference: ImageReferenceOutcome = {
+      requestedCount: requestedImageCount,
+      status: requestedImageCount > 0 ? "ignored" : "not requested",
+      detail:
+        requestedImageCount > 0
+          ? "--from mode does not call the model, so image references were ignored"
+          : "",
+    };
+
     if (requestedImageCount > 0) {
-      imageReferenceStatus = "ignored";
-      imageReferenceDetail = "--from mode does not call the model, so image references were ignored";
       console.log(pc.yellow("Image references ignored in --from mode; continuing with existing theme manifest."));
     }
 
-    const checks = runContrastChecks(manifest);
-    failedChecks = checks.filter((check) => !check.pass);
-    printContrastTable(checks);
+    const result = await writeThemeArtifacts({
+      manifest,
+      failedChecks: checks.filter((check) => !check.pass),
+      stream: null,
+      fromExisting: true,
+      outputDir: resolved.outputDir,
+      manifestPath: resolved.manifestPath,
+      webStore: cliWebStore,
+      screenshots: cliScreenshots,
+      imageReference,
+    });
+
+    results.push(result);
   } else {
     if (requestedImageCount > 0) {
       const imageSupport = await modelSupportsImageInputs(process.env.OPENROUTER_MODEL);
       if (imageSupport === false) {
-        imageReferenceStatus = "fallback";
-        imageReferenceDetail =
+        sharedImageOutcome.status = "fallback";
+        sharedImageOutcome.detail =
           "configured model does not advertise image inputs; continuing with prompt-only generation";
         console.log(
           pc.yellow(
             `Configured model (${process.env.OPENROUTER_MODEL}) does not advertise image inputs. Continuing without image references.`,
           ),
         );
-      }
-
-      if (imageSupport !== false) {
+      } else {
         try {
           preparedReferences = await prepareReferenceImages(cliImageSources);
           if (preparedReferences.length > 0) {
-            imageReferenceStatus = "prepared";
-            imageReferenceDetail = `${preparedReferences.length}/${requestedImageCount} reference image(s) prepared`;
+            sharedImageOutcome.status = "prepared";
+            sharedImageOutcome.detail = `${preparedReferences.length}/${requestedImageCount} reference image(s) prepared`;
           } else {
-            imageReferenceStatus = "fallback";
-            imageReferenceDetail = "no usable image references were prepared; continuing with prompt-only generation";
+            sharedImageOutcome.status = "fallback";
+            sharedImageOutcome.detail = "no usable image references were prepared; continuing with prompt-only generation";
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          imageReferenceStatus = "fallback";
-          imageReferenceDetail = `image preparation failed (${message}); continuing with prompt-only generation`;
+          sharedImageOutcome.status = "fallback";
+          sharedImageOutcome.detail = `image preparation failed (${message}); continuing with prompt-only generation`;
           preparedReferences = [];
           console.log(pc.yellow(`Failed to prepare reference images: ${message}`));
           console.log(pc.yellow("Continuing with prompt-only generation."));
@@ -1852,213 +2468,80 @@ async function main(): Promise<void> {
     }
 
     const modePreference = detectModePreference(input);
-    let retryFailedPairs: string[] = [];
-    let bestResult:
-      | {
-          manifest: ThemeManifest;
-          checks: ContrastCheck[];
-          stream: StreamThemeResult;
-        }
-      | undefined;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-      if (attempt > 0) {
-        console.log(pc.yellow(`Retrying generation (${attempt}/${MAX_RETRIES})...`));
+    for (let variationIndex = 1; variationIndex <= variationCount; variationIndex += 1) {
+      if (variationCount > 1) {
+        console.log(pc.cyan(`Generating variation ${variationIndex}/${variationCount}...`));
       }
 
-      const messages: ChatMessage[] = [
-        { role: "system", content: SYSTEM_PROMPT },
-        {
-          role: "user",
-          content:
-            preparedReferences.length > 0
-              ? [
-                  {
-                    type: "text",
-                    text: buildUserMessage(input, retryFailedPairs, modePreference, preparedReferences),
-                  },
-                  ...preparedReferences.map((reference) => ({
-                    type: "image_url" as const,
-                    image_url: {
-                      url: reference.url,
-                    },
-                  })),
-                ]
-              : buildUserMessage(input, retryFailedPairs, modePreference, preparedReferences),
-        },
-      ];
-
-      let streamResult: StreamThemeResult;
+      let generated;
       try {
-        streamResult = await streamThemeManifest(messages, configuredThinking, preparedReferences.length > 0);
+        generated = await generateManifestFromPrompt({
+          prompt: input,
+          variationIndex,
+          variationCount,
+          configuredThinking,
+          modePreference,
+          nameOverride: cliNameOverride,
+          preparedReferences,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.error(pc.red(`Streaming failed: ${message}`));
+        console.error(pc.red(`Generation failed for variation ${variationIndex}: ${message}`));
         process.exit(1);
       }
 
-      const rawManifest = streamResult.rawManifest;
+      const imageReference: ImageReferenceOutcome = {
+        requestedCount: sharedImageOutcome.requestedCount,
+        status: sharedImageOutcome.status,
+        detail: sharedImageOutcome.detail,
+      };
 
-      let parsedManifest: unknown;
-      try {
-        parsedManifest = JSON.parse(rawManifest);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(pc.red(`Failed to parse generated JSON: ${message}`));
-        console.error(pc.red("Raw output:"));
-        console.error(rawManifest);
-        process.exit(1);
-      }
-
-      const validationErrors = validateManifest(parsedManifest);
-      if (validationErrors.length > 0) {
-        console.error(pc.red("Validation failed:"));
-        for (const err of validationErrors) {
-          console.error(pc.red(`- ${err}`));
+      if (requestedImageCount > 0 && preparedReferences.length > 0) {
+        if (generated.stream.imageFallbackUsed) {
+          imageReference.status = "fallback";
+          imageReference.detail = "model rejected image inputs; fallback to prompt-only generation was used";
+        } else {
+          imageReference.status = "used";
+          imageReference.detail = `${preparedReferences.length}/${requestedImageCount} reference image(s) used`;
         }
-        process.exit(1);
       }
 
-      const generatedManifest = parsedManifest as ThemeManifest;
-      generatedManifest.name = cliNameOverride ?? normalizeGeneratedName(generatedManifest.name);
-      const checks = runContrastChecks(generatedManifest);
-      const failed = checks.filter((check) => !check.pass);
+      const result = await writeThemeArtifacts({
+        manifest: generated.manifest,
+        failedChecks: generated.failedChecks,
+        stream: generated.stream,
+        fromExisting: false,
+        outputDir: "",
+        manifestPath: "",
+        webStore: cliWebStore,
+        screenshots: cliScreenshots,
+        imageReference,
+      });
 
-      printContrastTable(checks);
-
-      if (!bestResult || failed.length < bestResult.checks.filter((c) => !c.pass).length) {
-        bestResult = { manifest: generatedManifest, checks, stream: streamResult };
-      }
-
-      if (failed.length <= 2) {
-        break;
-      }
-
-      if (attempt < MAX_RETRIES) {
-        retryFailedPairs = failed.map((check) => check.label);
-        console.log(
-          pc.yellow(
-            `More than 2 contrast checks failed (${failed.length}). Requesting an accessibility-focused retry.`,
-          ),
-        );
-      }
-    }
-
-    if (!bestResult) {
-      console.error(pc.red("No valid theme manifest was produced."));
-      process.exit(1);
-    }
-
-    manifest = bestResult.manifest;
-    bestStream = bestResult.stream;
-
-    if (requestedImageCount > 0 && preparedReferences.length > 0) {
-      if (bestStream.imageFallbackUsed) {
-        imageReferenceStatus = "fallback";
-        imageReferenceDetail = "model rejected image inputs; fallback to prompt-only generation was used";
-      } else {
-        imageReferenceStatus = "used";
-        imageReferenceDetail = `${preparedReferences.length}/${requestedImageCount} reference image(s) used`;
-      }
-    }
-
-    failedChecks = bestResult.checks.filter((check) => !check.pass);
-    const folderName = slugify(manifest.name);
-    outputDir = `${process.cwd()}/${folderName}`;
-    await fs.mkdir(outputDir, { recursive: true });
-    manifestPath = `${outputDir}/manifest.json`;
-  }
-
-  let iconPath: string | null = null;
-  let iconStartHex: string | null = null;
-  let iconEndHex: string | null = null;
-
-  if (cliWebStore) {
-    const iconFileName = "icon-128.png";
-    const gradientPair = selectGradientPair(manifest);
-    iconPath = path.join(outputDir, iconFileName);
-    iconStartHex = rgbToHex(gradientPair.start);
-    iconEndHex = rgbToHex(gradientPair.end);
-    await writeGradientIcon(iconPath, gradientPair.start, gradientPair.end, 128);
-    manifest.icons = {
-      ...(manifest.icons ?? {}),
-      "128": iconFileName,
-    };
-  }
-
-  await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-  const folderName = slugify(manifest.name);
-  const webStoreZipPath = `${process.cwd()}/${folderName}-webstore.zip`;
-
-  try {
-    await buildWebStorePackage(outputDir, webStoreZipPath, manifest);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(pc.red(message));
-    process.exit(1);
-  }
-
-  let descriptionPath: string | null = null;
-  let metadataPath: string | null = null;
-  if (cliWebStore && iconPath && iconStartHex && iconEndHex) {
-    const written = await writeWebStoreDescriptionFiles(
-      manifest,
-      folderName,
-      webStoreZipPath,
-      iconPath,
-      iconStartHex,
-      iconEndHex,
-    );
-    descriptionPath = written.descriptionPath;
-    metadataPath = written.metadataPath;
-  }
-
-  console.log(pc.green(fromExisting ? "Existing theme processed successfully." : "Theme manifest generated and validated successfully."));
-  console.log(pc.bold(pc.cyan(`Written: ${manifestPath}`)));
-  console.log(pc.bold(pc.cyan(`Web Store package: ${webStoreZipPath}`)));
-  console.log(
-    `Key colours: frame=${rgbToHex(manifest.theme.colors.frame)}, toolbar=${rgbToHex(
-      manifest.theme.colors.toolbar,
-    )}, ntp_background=${rgbToHex(manifest.theme.colors.ntp_background)}`,
-  );
-
-  if (iconPath && iconStartHex && iconEndHex) {
-    console.log(pc.bold(pc.cyan(`Icon: ${iconPath}`)));
-    console.log(`Icon gradient: ${iconStartHex} -> ${iconEndHex}`);
-  }
-
-  if (descriptionPath && metadataPath) {
-    console.log(pc.bold(pc.cyan(`Listing draft: ${descriptionPath}`)));
-    console.log(pc.bold(pc.cyan(`Publish metadata: ${metadataPath}`)));
-  }
-
-  if (requestedImageCount > 0) {
-    const statusLabel = imageReferenceStatus === "used" ? pc.green("used") : pc.yellow("not used");
-    const detail = imageReferenceDetail || `${requestedImageCount} reference image(s) were requested`;
-    console.log(`Image references: ${statusLabel} (${detail})`);
-  }
-
-  if (failedChecks.length > 0) {
-    const labels = failedChecks.map((check) => check.label).join(", ");
-    if (failedChecks.length > 2) {
-      console.log(
-        pc.red(
-          `Warning: theme written after ${MAX_RETRIES} retries with remaining contrast failures: ${labels}`,
-        ),
-      );
-    } else {
-      console.log(
-        pc.red(`Warning: theme written, but some contrast checks failed and legibility may be impacted: ${labels}`),
-      );
+      results.push(result);
     }
   }
 
-  printColorSummary(manifest);
+  const shouldWritePreviewSheet = cliPreviewSheet || results.length > 1;
+  let previewPath: string | null = null;
+  if (shouldWritePreviewSheet) {
+    const previewPromptLabel = cliFromPath ? `from: ${cliFromPath}` : trimPromptForPreview(input);
+    previewPath = await writePreviewSheet(results, previewPromptLabel);
+  }
 
-  if (bestStream) {
-    const generation = await fetchGenerationMetadata(apiKey ?? "", bestStream.generationId);
-    printRequestSummary(bestStream, generation);
+  for (let i = 0; i < results.length; i += 1) {
+    const result = results[i];
+    printResultSummary(result, results.length, i + 1);
+
+    if (result.stream) {
+      const generation = await fetchGenerationMetadata(apiKey ?? "", result.stream.generationId);
+      printRequestSummary(result.stream, generation);
+    }
+  }
+
+  if (previewPath) {
+    console.log(pc.bold(pc.cyan(`Preview sheet: ${previewPath}`)));
   }
 }
 
