@@ -676,6 +676,16 @@ function printColorSummary(manifest: ThemeManifest): void {
   }
 }
 
+async function buildWebStorePackage(manifestPath: string, zipPath: string): Promise<void> {
+  try {
+    await Bun.$`rm -f ${zipPath}`;
+    await Bun.$`zip -X -j -q ${zipPath} ${manifestPath}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to create Chrome Web Store package: ${message}`);
+  }
+}
+
 async function fetchGenerationMetadata(
   apiKey: string,
   generationId: string | null,
@@ -1097,9 +1107,19 @@ async function main(): Promise<void> {
 
   const manifestPath = `${outputDir}/manifest.json`;
   await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const webStoreZipPath = `${process.cwd()}/${folderName}-webstore.zip`;
+
+  try {
+    await buildWebStorePackage(manifestPath, webStoreZipPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(pc.red(message));
+    process.exit(1);
+  }
 
   console.log(pc.green("Theme manifest generated and validated successfully."));
   console.log(pc.bold(pc.cyan(`Written: ${manifestPath}`)));
+  console.log(pc.bold(pc.cyan(`Web Store package: ${webStoreZipPath}`)));
   console.log(
     `Key colours: frame=${rgbToHex(manifest.theme.colors.frame)}, toolbar=${rgbToHex(
       manifest.theme.colors.toolbar,

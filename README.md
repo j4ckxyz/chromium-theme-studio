@@ -61,6 +61,7 @@ bun run generate.ts "deep forest, muted greens and browns"
 - Streams model reasoning to the terminal in dim grey with `🤔` prefix
 - Accumulates JSON output silently, then validates the manifest
 - Writes `manifest.json` to a slugified folder named after the generated theme
+- Creates a ready-to-upload Chrome Web Store zip (`<theme-name>-webstore.zip`) containing the manifest
 - Prints key colors (`frame`, `toolbar`, `ntp_background`) as hex values
 - Prints concise API stats: model, thinking mode, token counts, timing, generation ID, and cost (when available)
 
