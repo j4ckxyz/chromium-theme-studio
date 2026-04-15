@@ -35,6 +35,18 @@ A Bun CLI that generates polished Chromium browser themes from a text prompt usi
 bun run generate.ts "your theme description"
 ```
 
+Show CLI help:
+
+```bash
+bun run generate.ts -h
+```
+
+Set an explicit theme/package name:
+
+```bash
+bun run generate.ts --name "Sunset Ember" "warm sunset tones, orange and amber, dark background"
+```
+
 Optional reasoning mode:
 
 ```bash
@@ -47,6 +59,7 @@ Supported `--thinking` values: `xhigh`, `high`, `medium`, `low`, `minimal`, `non
 - Use `--thinking=<level>` for reasoning-capable models.
 - Use `--thinking=off` (or omit the flag) for non-reasoning mode.
 - If reasoning is requested but rejected by the model/provider, the CLI automatically retries without reasoning.
+- Use `--name` (or `-n`) to override the generated theme name used for output folder/zip naming.
 
 Examples:
 

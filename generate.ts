@@ -65,6 +65,13 @@ type ThinkingConfig = {
   effort: ThinkingEffort;
 };
 
+type CliOptions = {
+  prompt: string;
+  thinking: ThinkingConfig | null;
+  nameOverride: string | null;
+  help: boolean;
+};
+
 type ChatUsage = {
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -235,6 +242,7 @@ const RETRY_NOTE_PREFIX =
   "IMPORTANT: Your previous attempt failed contrast checks on:";
 
 const THINKING_FLAG_PREFIX = "--thinking=";
+const NAME_FLAG_PREFIX = "--name=";
 
 const REQUIRED_COLOR_KEYS = [
   "frame",
@@ -257,11 +265,20 @@ const DEFAULT_THINKING: ThinkingConfig = { effort: "high" };
 
 const THINKING_EFFORTS: ThinkingEffort[] = ["xhigh", "high", "medium", "low", "minimal", "none"];
 
-function usage(): never {
-  console.error(pc.red('Usage: bun run generate.ts [--thinking=<level>] "your theme description"'));
-  console.error(pc.red("  tip: omit --thinking for non-reasoning mode"));
-  console.error(pc.red("  levels: xhigh|high|medium|low|minimal|none|off"));
-  process.exit(1);
+function usage(exitCode = 1): never {
+  const printer = exitCode === 0 ? console.log : console.error;
+  printer('Usage: bun run generate.ts [options] "your theme description"');
+  printer("");
+  printer("Options:");
+  printer("  -h, --help              Show this help message");
+  printer("  -n, --name <name>       Set an explicit theme/package name");
+  printer("      --name=<name>       Same as --name");
+  printer("      --thinking=<level>  Enable model reasoning effort");
+  printer("      --thinking [level]  Same as --thinking=<level>");
+  printer("");
+  printer("Thinking levels: xhigh|high|medium|low|minimal|none|off");
+  printer("Tip: omit --thinking (or use --thinking=off) for non-reasoning mode");
+  process.exit(exitCode);
 }
 
 function parseThinkingValue(raw: string | undefined): ThinkingConfig | null {
@@ -285,12 +302,44 @@ function parseThinkingValue(raw: string | undefined): ThinkingConfig | null {
   throw new Error(`Invalid thinking level: ${raw}`);
 }
 
-function parseCliOptions(argv: string[]): { prompt: string; thinking: ThinkingConfig | null } {
+function parseCliOptions(argv: string[]): CliOptions {
   const promptParts: string[] = [];
   let thinking: ThinkingConfig | null = null;
+  let nameOverride: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+
+    if (arg === "-h" || arg === "--help") {
+      return {
+        prompt: "",
+        thinking,
+        nameOverride,
+        help: true,
+      };
+    }
+
+    if (arg.startsWith(NAME_FLAG_PREFIX)) {
+      const value = arg.slice(NAME_FLAG_PREFIX.length).trim();
+      if (!value) {
+        throw new Error("--name requires a non-empty value");
+      }
+      nameOverride = value;
+      continue;
+    }
+
+    if (arg === "--name" || arg === "-n") {
+      const next = argv[i + 1];
+      if (typeof next !== "string" || next.startsWith("-")) {
+        throw new Error("--name requires a value");
+      }
+      nameOverride = next.trim();
+      if (!nameOverride) {
+        throw new Error("--name requires a non-empty value");
+      }
+      i += 1;
+      continue;
+    }
 
     if (arg.startsWith(THINKING_FLAG_PREFIX)) {
       thinking = parseThinkingValue(arg.slice(THINKING_FLAG_PREFIX.length));
@@ -315,7 +364,7 @@ function parseCliOptions(argv: string[]): { prompt: string; thinking: ThinkingCo
     promptParts.push(arg);
   }
 
-  return { prompt: promptParts.join(" ").trim(), thinking };
+  return { prompt: promptParts.join(" ").trim(), thinking, nameOverride, help: false };
 }
 
 function slugify(value: string): string {
@@ -548,30 +597,20 @@ function detectModePreference(input: string): ModePreference {
   return null;
 }
 
-function applyModeNaming(name: string, mode: ModePreference): string {
-  const baseName = name.trim().replace(/\s*-[ld]\s*$/i, "").trim() || "Theme";
-
-  if (mode === "light") {
-    return `${baseName}-l`;
-  }
-
-  if (mode === "dark") {
-    return `${baseName}-d`;
-  }
-
-  return baseName;
+function normalizeGeneratedName(name: string): string {
+  return name.trim().replace(/\s*-[ld]\s*$/i, "").trim() || "Theme";
 }
 
 function buildModeInstruction(mode: ModePreference): string {
   if (mode === "light") {
-    return "Naming rule: The user explicitly requested light mode. The `name` field must end with -l.";
+    return "Mode preference: The user explicitly requested a light theme. Keep the overall palette and luminance clearly light.";
   }
 
   if (mode === "dark") {
-    return "Naming rule: The user explicitly requested dark mode. The `name` field must end with -d.";
+    return "Mode preference: The user explicitly requested a dark theme. Keep the overall palette and luminance clearly dark.";
   }
 
-  return "Naming rule: The user did not explicitly request light or dark mode. Choose light/dark direction based on the prompt vibe, and do not add -l or -d suffixes to the `name` field.";
+  return "Mode preference: No explicit light/dark mode was requested. Choose the direction that best matches the prompt vibe.";
 }
 
 function buildUserMessage(input: string, failedPairs: string[], mode: ModePreference): string {
@@ -996,10 +1035,15 @@ async function streamThemeManifest(
 async function main(): Promise<void> {
   let input = "";
   let cliThinking: ThinkingConfig | null = null;
+  let cliNameOverride: string | null = null;
   try {
     const parsed = parseCliOptions(Bun.argv.slice(2));
+    if (parsed.help) {
+      usage(0);
+    }
     input = parsed.prompt;
     cliThinking = parsed.thinking;
+    cliNameOverride = parsed.nameOverride;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(pc.red(message));
@@ -1069,7 +1113,7 @@ async function main(): Promise<void> {
     }
 
     const manifest = parsedManifest as ThemeManifest;
-    manifest.name = applyModeNaming(manifest.name, modePreference);
+    manifest.name = cliNameOverride ?? normalizeGeneratedName(manifest.name);
     const checks = runContrastChecks(manifest);
     const failedChecks = checks.filter((check) => !check.pass);
 
