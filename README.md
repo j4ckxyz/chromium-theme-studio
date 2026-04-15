@@ -47,6 +47,15 @@ Set an explicit theme/package name:
 bun run generate.ts --name "Sunset Ember" "warm sunset tones, orange and amber, dark background"
 ```
 
+Use one or more reference images for palette inspiration:
+
+```bash
+bun run generate.ts \
+  --image "./references/sunset-photo.heic" \
+  --image "https://example.com/mood-board.webp" \
+  "the blue in the sky from the reference photo, warm horizon accents"
+```
+
 Generate extra Chrome Web Store assets:
 
 ```bash
@@ -73,6 +82,9 @@ Supported `--thinking` values: `xhigh`, `high`, `medium`, `low`, `minimal`, `non
 - Use `--thinking=off` (or omit the flag) for non-reasoning mode.
 - If reasoning is requested but rejected by the model/provider, the CLI automatically retries without reasoning.
 - Use `--name` (or `-n`) to override the generated theme name used for output folder/zip naming.
+- Use `--image` (or `-i`) with local paths or web URLs when using a vision-capable model.
+- Non-standard image formats are converted to PNG automatically using `ffmpeg` (fallback to `sips` on macOS).
+- If any image-reference step fails (unsupported model, invalid file, conversion issues, or API rejection), generation automatically falls back to prompt-only and reports this in CLI output.
 - Use `--web-store` (or `-w`) to generate a 128x128 icon, update manifest `icons`, and create listing drafts.
 - Use `--from` (or `-f`) to run web-store packaging against an existing theme without regenerating colors.
 
@@ -88,6 +100,7 @@ bun run generate.ts "deep forest, muted greens and browns"
 
 - Streams model reasoning to the terminal in dim grey with `🤔` prefix
 - Accumulates JSON output silently, then validates the manifest
+- Optionally sends attached reference images to compatible models for visual color inspiration
 - Writes `manifest.json` to a slugified folder named after the generated theme
 - Creates a ready-to-upload Chrome Web Store zip (`<theme-name>-webstore.zip`) containing manifest + icon assets
 - With `--web-store`, creates `icon-128.png`, `descriptions/<theme-name>.md`, and `descriptions/<theme-name>.json`

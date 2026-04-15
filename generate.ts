@@ -1,5 +1,7 @@
 import contrastLib from "get-contrast";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import pc from "picocolors";
 import { PNG } from "pngjs";
@@ -8,8 +10,20 @@ type Role = "system" | "user";
 
 type ChatMessage = {
   role: Role;
-  content: string;
+  content: string | ChatContentPart[];
 };
+
+type ChatContentPart =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "image_url";
+      image_url: {
+        url: string;
+      };
+    };
 
 type Rgb = [number, number, number];
 type Rgba = [number, number, number, number];
@@ -73,9 +87,16 @@ type CliOptions = {
   prompt: string;
   thinking: ThinkingConfig | null;
   nameOverride: string | null;
+  imageSources: string[];
   webStore: boolean;
   fromPath: string | null;
   help: boolean;
+};
+
+type PreparedReferenceImage = {
+  source: string;
+  url: string;
+  format: string;
 };
 
 type ChatUsage = {
@@ -97,6 +118,7 @@ type StreamThemeResult = {
   requestedThinking: ThinkingConfig | null;
   usedThinking: ThinkingConfig | null;
   thinkingFallbackUsed: boolean;
+  imageFallbackUsed: boolean;
 };
 
 type GenerationMetadata = {
@@ -250,6 +272,35 @@ const RETRY_NOTE_PREFIX =
 const THINKING_FLAG_PREFIX = "--thinking=";
 const NAME_FLAG_PREFIX = "--name=";
 const FROM_FLAG_PREFIX = "--from=";
+const IMAGE_FLAG_PREFIX = "--image=";
+
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+const EXTENSION_TO_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".avif": "image/avif",
+};
+
+const MIME_TO_EXTENSION: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/bmp": ".bmp",
+  "image/tiff": ".tiff",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
+  "image/avif": ".avif",
+};
 
 const REQUIRED_COLOR_KEYS = [
   "frame",
@@ -280,9 +331,11 @@ function usage(exitCode = 1): never {
   printer("Options:");
   printer("  -h, --help              Show this help message");
   printer("  -n, --name <name>       Set an explicit theme/package name");
+  printer("  -i, --image <path/url>  Add image reference for palette inspiration");
   printer("  -w, --web-store         Generate CWS-ready icon and listing drafts");
   printer("  -f, --from <path>       Re-process an existing theme manifest/folder");
   printer("      --name=<name>       Same as --name");
+  printer("      --image=<path/url>  Same as --image (repeatable)");
   printer("      --from=<path>       Same as --from");
   printer("      --thinking=<level>  Enable model reasoning effort");
   printer("      --thinking [level]  Same as --thinking=<level>");
@@ -317,6 +370,7 @@ function parseCliOptions(argv: string[]): CliOptions {
   const promptParts: string[] = [];
   let thinking: ThinkingConfig | null = null;
   let nameOverride: string | null = null;
+  const imageSources: string[] = [];
   let webStore = false;
   let fromPath: string | null = null;
 
@@ -328,6 +382,7 @@ function parseCliOptions(argv: string[]): CliOptions {
         prompt: "",
         thinking,
         nameOverride,
+        imageSources,
         webStore,
         fromPath,
         help: true,
@@ -336,6 +391,25 @@ function parseCliOptions(argv: string[]): CliOptions {
 
     if (arg === "-w" || arg === "--web-store") {
       webStore = true;
+      continue;
+    }
+
+    if (arg.startsWith(IMAGE_FLAG_PREFIX)) {
+      const value = arg.slice(IMAGE_FLAG_PREFIX.length).trim();
+      if (!value) {
+        throw new Error("--image requires a value");
+      }
+      imageSources.push(value);
+      continue;
+    }
+
+    if (arg === "--image" || arg === "-i") {
+      const next = argv[i + 1];
+      if (typeof next !== "string" || next.startsWith("-")) {
+        throw new Error("--image requires a value");
+      }
+      imageSources.push(next.trim());
+      i += 1;
       continue;
     }
 
@@ -414,6 +488,7 @@ function parseCliOptions(argv: string[]): CliOptions {
     prompt: promptParts.join(" ").trim(),
     thinking,
     nameOverride,
+    imageSources,
     webStore,
     fromPath,
     help: false,
@@ -476,6 +551,219 @@ function formatUsd(value: number | null): string {
   }
 
   return `$${value.toFixed(value < 0.01 ? 6 : 4)}`;
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function detectMimeTypeFromPath(filePath: string): string | null {
+  const ext = path.extname(filePath).toLowerCase();
+  return EXTENSION_TO_MIME[ext] ?? null;
+}
+
+function extensionFromMime(mimeType: string): string {
+  return MIME_TO_EXTENSION[mimeType] ?? ".bin";
+}
+
+function normalizeMimeType(raw: string | null): string | null {
+  if (!raw) {
+    return null;
+  }
+
+  return raw.split(";")[0]?.trim().toLowerCase() ?? null;
+}
+
+async function convertImageToPng(inputPath: string, outputPath: string): Promise<void> {
+  const ffmpegProc = Bun.spawn(["ffmpeg", "-y", "-i", inputPath, "-frames:v", "1", outputPath], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const ffmpegExitCode = await ffmpegProc.exited;
+  if (ffmpegExitCode === 0) {
+    return;
+  }
+
+  const ffmpegError = (await new Response(ffmpegProc.stderr).text()).trim();
+
+  const sipsProc = Bun.spawn(["sips", "-s", "format", "png", inputPath, "--out", outputPath], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const sipsExitCode = await sipsProc.exited;
+  if (sipsExitCode !== 0) {
+    const sipsError = (await new Response(sipsProc.stderr).text()).trim();
+    throw new Error(
+      `Failed to convert image (${inputPath}). ffmpeg: ${ffmpegError || `exit code ${ffmpegExitCode}`}; sips: ${sipsError || `exit code ${sipsExitCode}`}`,
+    );
+  }
+}
+
+async function fileToDataUrl(filePath: string, mimeType: string): Promise<string> {
+  const bytes = await Bun.file(filePath).arrayBuffer();
+  const base64 = Buffer.from(bytes).toString("base64");
+  return `data:${mimeType};base64,${base64}`;
+}
+
+async function downloadImageToTemp(sourceUrl: string, tempDir: string): Promise<{ filePath: string; mimeType: string | null }> {
+  const response = await fetch(sourceUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to download image URL (${response.status}): ${sourceUrl}`);
+  }
+
+  const mimeType = normalizeMimeType(response.headers.get("content-type"));
+  const urlPath = new URL(sourceUrl).pathname;
+  const extFromUrl = path.extname(urlPath).toLowerCase();
+  const fallbackExt = extFromUrl || extensionFromMime(mimeType ?? "application/octet-stream");
+  const filePath = path.join(tempDir, `ref-${randomUUID()}${fallbackExt}`);
+  const data = new Uint8Array(await response.arrayBuffer());
+  await Bun.write(filePath, data);
+  return { filePath, mimeType };
+}
+
+async function prepareReferenceImages(sources: string[]): Promise<PreparedReferenceImage[]> {
+  const images: PreparedReferenceImage[] = [];
+  const tempDir = path.join(os.tmpdir(), "chromium-theme-studio");
+  await fs.mkdir(tempDir, { recursive: true });
+
+  for (const source of sources) {
+    if (isHttpUrl(source)) {
+      const directMime = detectMimeTypeFromPath(new URL(source).pathname);
+      if (directMime && SUPPORTED_IMAGE_MIME_TYPES.has(directMime)) {
+        images.push({
+          source,
+          url: source,
+          format: directMime,
+        });
+        continue;
+      }
+
+      const downloaded = await downloadImageToTemp(source, tempDir);
+      try {
+        const downloadedMime = downloaded.mimeType ?? detectMimeTypeFromPath(downloaded.filePath);
+
+        if (downloadedMime && SUPPORTED_IMAGE_MIME_TYPES.has(downloadedMime)) {
+          images.push({
+            source,
+            url: await fileToDataUrl(downloaded.filePath, downloadedMime),
+            format: downloadedMime,
+          });
+          continue;
+        }
+
+        const convertedPath = path.join(tempDir, `ref-${randomUUID()}.png`);
+        await convertImageToPng(downloaded.filePath, convertedPath);
+        try {
+          images.push({
+            source,
+            url: await fileToDataUrl(convertedPath, "image/png"),
+            format: "image/png",
+          });
+        } finally {
+          await fs.rm(convertedPath, { force: true });
+        }
+      } finally {
+        await fs.rm(downloaded.filePath, { force: true });
+      }
+      continue;
+    }
+
+    const resolvedLocalPath = path.resolve(process.cwd(), source);
+    try {
+      await fs.access(resolvedLocalPath);
+    } catch {
+      throw new Error(`Image path not found: ${source}`);
+    }
+
+    const stats = await fs.stat(resolvedLocalPath);
+    if (!stats.isFile()) {
+      throw new Error(`Image path must be a file: ${source}`);
+    }
+
+    const localMime = detectMimeTypeFromPath(resolvedLocalPath);
+    if (localMime && SUPPORTED_IMAGE_MIME_TYPES.has(localMime)) {
+      images.push({
+        source,
+        url: await fileToDataUrl(resolvedLocalPath, localMime),
+        format: localMime,
+      });
+      continue;
+    }
+
+    const convertedPath = path.join(tempDir, `ref-${randomUUID()}.png`);
+    await convertImageToPng(resolvedLocalPath, convertedPath);
+    try {
+      images.push({
+        source,
+        url: await fileToDataUrl(convertedPath, "image/png"),
+        format: "image/png",
+      });
+    } finally {
+      await fs.rm(convertedPath, { force: true });
+    }
+  }
+
+  return images;
+}
+
+function modelSupportsImageInputsFromMetadata(metadata: unknown): boolean | null {
+  if (!metadata || typeof metadata !== "object") {
+    return null;
+  }
+
+  const record = metadata as {
+    architecture?: { input_modalities?: unknown };
+    input_modalities?: unknown;
+    modalities?: unknown;
+  };
+
+  const candidates = [record.architecture?.input_modalities, record.input_modalities, record.modalities];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      const normalized = candidate
+        .filter((v): v is string => typeof v === "string")
+        .map((v) => v.toLowerCase());
+      if (normalized.some((v) => v.includes("image"))) {
+        return true;
+      }
+      if (normalized.length > 0) {
+        return false;
+      }
+    }
+  }
+
+  return null;
+}
+
+async function modelSupportsImageInputs(model: string | undefined): Promise<boolean | null> {
+  if (!model) {
+    return null;
+  }
+
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/models");
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = (await response.json()) as { data?: Array<Record<string, unknown>> };
+    const allModels = Array.isArray(payload.data) ? payload.data : [];
+    const target = allModels.find((item) => {
+      const id = typeof item.id === "string" ? item.id : "";
+      const slug = typeof item.slug === "string" ? item.slug : "";
+      return id === model || slug === model;
+    });
+
+    return modelSupportsImageInputsFromMetadata(target ?? null);
+  } catch {
+    return null;
+  }
 }
 
 function shouldFallbackToNonReasoning(status: number, body: string): boolean {
@@ -666,8 +954,18 @@ function buildModeInstruction(mode: ModePreference): string {
   return "Mode preference: No explicit light/dark mode was requested. Choose the direction that best matches the prompt vibe.";
 }
 
-function buildUserMessage(input: string, failedPairs: string[], mode: ModePreference): string {
+function buildUserMessage(
+  input: string,
+  failedPairs: string[],
+  mode: ModePreference,
+  references: PreparedReferenceImage[],
+): string {
   const parts = [FEW_SHOT_EXAMPLES, `Theme request: ${input}`, buildModeInstruction(mode)];
+  if (references.length > 0) {
+    parts.push(
+      `Reference images attached (${references.length}). Use them for colour inspiration and palette extraction aligned with the user's request.`,
+    );
+  }
   if (failedPairs.length > 0) {
     parts.push(
       `${RETRY_NOTE_PREFIX} ${failedPairs.join(", ")}.
@@ -1194,12 +1492,21 @@ function printRequestSummary(stream: StreamThemeResult, generation: GenerationMe
       ? "off (fallback)"
       : "off";
 
+  const fallbackTokens: string[] = [];
+  if (stream.thinkingFallbackUsed) {
+    fallbackTokens.push("reasoning");
+  }
+  if (stream.imageFallbackUsed) {
+    fallbackTokens.push("image");
+  }
+  const fallbackSummary = fallbackTokens.length > 0 ? `  fallback=${fallbackTokens.join("+")}` : "";
+
   console.log(pc.cyan("Request summary:"));
   console.log(
     `  model=${modelUsed}${generation?.provider_name ? `  provider=${generation.provider_name}` : ""}  thinking=${thinking}`,
   );
   console.log(
-    `  time=${formatMs(stream.requestDurationMs)}  first_thought=${formatMs(stream.timeToThinkingMs)}  provider_latency=${formatMs(generation?.latency ?? null)}${stream.thinkingFallbackUsed ? "  fallback=yes" : ""}`,
+    `  time=${formatMs(stream.requestDurationMs)}  first_thought=${formatMs(stream.timeToThinkingMs)}  provider_latency=${formatMs(generation?.latency ?? null)}${fallbackSummary}`,
   );
   console.log(
     `  tokens p/c/r/t=${promptTokens ?? "n/a"}/${completionTokens ?? "n/a"}/${reasoningTokens ?? "n/a"}/${totalTokens ?? "n/a"}`,
@@ -1212,6 +1519,7 @@ function printRequestSummary(stream: StreamThemeResult, generation: GenerationMe
 async function streamThemeManifest(
   messages: ChatMessage[],
   configuredThinking: ThinkingConfig | null,
+  allowImageFallback = false,
 ): Promise<StreamThemeResult> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   const model = process.env.OPENROUTER_MODEL;
@@ -1353,6 +1661,7 @@ async function streamThemeManifest(
             requestedThinking: thinking,
             usedThinking: thinking,
             thinkingFallbackUsed: false,
+            imageFallbackUsed: false,
           };
         }
       }
@@ -1372,6 +1681,7 @@ async function streamThemeManifest(
       requestedThinking: thinking,
       usedThinking: thinking,
       thinkingFallbackUsed: false,
+      imageFallbackUsed: false,
     };
   };
 
@@ -1394,6 +1704,44 @@ async function streamThemeManifest(
           requestedThinking,
           usedThinking: null,
           thinkingFallbackUsed: true,
+          imageFallbackUsed: false,
+        };
+      }
+    }
+
+    if (allowImageFallback && match) {
+      const status = Number(match[1]);
+      const body = (match[2] ?? "").toLowerCase();
+      const mentionsImageIssue =
+        body.includes("image") ||
+        body.includes("vision") ||
+        body.includes("content part") ||
+        body.includes("input modality") ||
+        body.includes("unsupported") ||
+        body.includes("not support");
+
+      if ((status === 400 || status === 422) && mentionsImageIssue) {
+        const strippedMessages = messages.map((message) => {
+          if (!Array.isArray(message.content)) {
+            return message;
+          }
+
+          const textParts = message.content.filter(
+            (part): part is Extract<ChatContentPart, { type: "text" }> => part.type === "text",
+          );
+
+          return {
+            ...message,
+            content: textParts.length > 0 ? textParts.map((part) => part.text).join("\n\n") : "",
+          };
+        });
+
+        console.log(pc.yellow("Model rejected image inputs for this request. Retrying without image references."));
+        const noImageResult = await streamThemeManifest(strippedMessages, configuredThinking, false);
+        return {
+          ...noImageResult,
+          requestedThinking,
+          imageFallbackUsed: true,
         };
       }
     }
@@ -1406,6 +1754,7 @@ async function main(): Promise<void> {
   let input = "";
   let cliThinking: ThinkingConfig | null = null;
   let cliNameOverride: string | null = null;
+  let cliImageSources: string[] = [];
   let cliWebStore = false;
   let cliFromPath: string | null = null;
   try {
@@ -1416,6 +1765,7 @@ async function main(): Promise<void> {
     input = parsed.prompt;
     cliThinking = parsed.thinking;
     cliNameOverride = parsed.nameOverride;
+    cliImageSources = parsed.imageSources;
     cliWebStore = parsed.webStore;
     cliFromPath = parsed.fromPath;
   } catch (error) {
@@ -1435,6 +1785,10 @@ async function main(): Promise<void> {
 
   const configuredThinking = cliThinking;
   const apiKey = process.env.OPENROUTER_API_KEY;
+  const requestedImageCount = cliImageSources.length;
+  let preparedReferences: PreparedReferenceImage[] = [];
+  let imageReferenceStatus = requestedImageCount > 0 ? "requested" : "not requested";
+  let imageReferenceDetail = "";
   let manifest: ThemeManifest;
   let failedChecks: ContrastCheck[] = [];
   let bestStream: StreamThemeResult | null = null;
@@ -1453,10 +1807,50 @@ async function main(): Promise<void> {
       manifest.name = cliNameOverride;
     }
 
+    if (requestedImageCount > 0) {
+      imageReferenceStatus = "ignored";
+      imageReferenceDetail = "--from mode does not call the model, so image references were ignored";
+      console.log(pc.yellow("Image references ignored in --from mode; continuing with existing theme manifest."));
+    }
+
     const checks = runContrastChecks(manifest);
     failedChecks = checks.filter((check) => !check.pass);
     printContrastTable(checks);
   } else {
+    if (requestedImageCount > 0) {
+      const imageSupport = await modelSupportsImageInputs(process.env.OPENROUTER_MODEL);
+      if (imageSupport === false) {
+        imageReferenceStatus = "fallback";
+        imageReferenceDetail =
+          "configured model does not advertise image inputs; continuing with prompt-only generation";
+        console.log(
+          pc.yellow(
+            `Configured model (${process.env.OPENROUTER_MODEL}) does not advertise image inputs. Continuing without image references.`,
+          ),
+        );
+      }
+
+      if (imageSupport !== false) {
+        try {
+          preparedReferences = await prepareReferenceImages(cliImageSources);
+          if (preparedReferences.length > 0) {
+            imageReferenceStatus = "prepared";
+            imageReferenceDetail = `${preparedReferences.length}/${requestedImageCount} reference image(s) prepared`;
+          } else {
+            imageReferenceStatus = "fallback";
+            imageReferenceDetail = "no usable image references were prepared; continuing with prompt-only generation";
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          imageReferenceStatus = "fallback";
+          imageReferenceDetail = `image preparation failed (${message}); continuing with prompt-only generation`;
+          preparedReferences = [];
+          console.log(pc.yellow(`Failed to prepare reference images: ${message}`));
+          console.log(pc.yellow("Continuing with prompt-only generation."));
+        }
+      }
+    }
+
     const modePreference = detectModePreference(input);
     let retryFailedPairs: string[] = [];
     let bestResult:
@@ -1476,13 +1870,27 @@ async function main(): Promise<void> {
         { role: "system", content: SYSTEM_PROMPT },
         {
           role: "user",
-          content: buildUserMessage(input, retryFailedPairs, modePreference),
+          content:
+            preparedReferences.length > 0
+              ? [
+                  {
+                    type: "text",
+                    text: buildUserMessage(input, retryFailedPairs, modePreference, preparedReferences),
+                  },
+                  ...preparedReferences.map((reference) => ({
+                    type: "image_url" as const,
+                    image_url: {
+                      url: reference.url,
+                    },
+                  })),
+                ]
+              : buildUserMessage(input, retryFailedPairs, modePreference, preparedReferences),
         },
       ];
 
       let streamResult: StreamThemeResult;
       try {
-        streamResult = await streamThemeManifest(messages, configuredThinking);
+        streamResult = await streamThemeManifest(messages, configuredThinking, preparedReferences.length > 0);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(pc.red(`Streaming failed: ${message}`));
@@ -1543,6 +1951,17 @@ async function main(): Promise<void> {
 
     manifest = bestResult.manifest;
     bestStream = bestResult.stream;
+
+    if (requestedImageCount > 0 && preparedReferences.length > 0) {
+      if (bestStream.imageFallbackUsed) {
+        imageReferenceStatus = "fallback";
+        imageReferenceDetail = "model rejected image inputs; fallback to prompt-only generation was used";
+      } else {
+        imageReferenceStatus = "used";
+        imageReferenceDetail = `${preparedReferences.length}/${requestedImageCount} reference image(s) used`;
+      }
+    }
+
     failedChecks = bestResult.checks.filter((check) => !check.pass);
     const folderName = slugify(manifest.name);
     outputDir = `${process.cwd()}/${folderName}`;
@@ -1612,6 +2031,12 @@ async function main(): Promise<void> {
   if (descriptionPath && metadataPath) {
     console.log(pc.bold(pc.cyan(`Listing draft: ${descriptionPath}`)));
     console.log(pc.bold(pc.cyan(`Publish metadata: ${metadataPath}`)));
+  }
+
+  if (requestedImageCount > 0) {
+    const statusLabel = imageReferenceStatus === "used" ? pc.green("used") : pc.yellow("not used");
+    const detail = imageReferenceDetail || `${requestedImageCount} reference image(s) were requested`;
+    console.log(`Image references: ${statusLabel} (${detail})`);
   }
 
   if (failedChecks.length > 0) {
