@@ -1,5 +1,8 @@
 import contrastLib from "get-contrast";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import pc from "picocolors";
+import { PNG } from "pngjs";
 
 type Role = "system" | "user";
 
@@ -16,6 +19,7 @@ type ThemeManifest = {
   manifest_version: number;
   name: string;
   version: string;
+  icons?: Record<string, string>;
   theme: {
     colors: {
       frame: Rgb;
@@ -69,6 +73,8 @@ type CliOptions = {
   prompt: string;
   thinking: ThinkingConfig | null;
   nameOverride: string | null;
+  webStore: boolean;
+  fromPath: string | null;
   help: boolean;
 };
 
@@ -243,6 +249,7 @@ const RETRY_NOTE_PREFIX =
 
 const THINKING_FLAG_PREFIX = "--thinking=";
 const NAME_FLAG_PREFIX = "--name=";
+const FROM_FLAG_PREFIX = "--from=";
 
 const REQUIRED_COLOR_KEYS = [
   "frame",
@@ -268,11 +275,15 @@ const THINKING_EFFORTS: ThinkingEffort[] = ["xhigh", "high", "medium", "low", "m
 function usage(exitCode = 1): never {
   const printer = exitCode === 0 ? console.log : console.error;
   printer('Usage: bun run generate.ts [options] "your theme description"');
+  printer('       bun run generate.ts --from <manifest-or-theme-folder> [options]');
   printer("");
   printer("Options:");
   printer("  -h, --help              Show this help message");
   printer("  -n, --name <name>       Set an explicit theme/package name");
+  printer("  -w, --web-store         Generate CWS-ready icon and listing drafts");
+  printer("  -f, --from <path>       Re-process an existing theme manifest/folder");
   printer("      --name=<name>       Same as --name");
+  printer("      --from=<path>       Same as --from");
   printer("      --thinking=<level>  Enable model reasoning effort");
   printer("      --thinking [level]  Same as --thinking=<level>");
   printer("");
@@ -306,6 +317,8 @@ function parseCliOptions(argv: string[]): CliOptions {
   const promptParts: string[] = [];
   let thinking: ThinkingConfig | null = null;
   let nameOverride: string | null = null;
+  let webStore = false;
+  let fromPath: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -315,8 +328,37 @@ function parseCliOptions(argv: string[]): CliOptions {
         prompt: "",
         thinking,
         nameOverride,
+        webStore,
+        fromPath,
         help: true,
       };
+    }
+
+    if (arg === "-w" || arg === "--web-store") {
+      webStore = true;
+      continue;
+    }
+
+    if (arg.startsWith(FROM_FLAG_PREFIX)) {
+      const value = arg.slice(FROM_FLAG_PREFIX.length).trim();
+      if (!value) {
+        throw new Error("--from requires a value");
+      }
+      fromPath = value;
+      continue;
+    }
+
+    if (arg === "--from" || arg === "-f") {
+      const next = argv[i + 1];
+      if (typeof next !== "string" || next.startsWith("-")) {
+        throw new Error("--from requires a value");
+      }
+      fromPath = next.trim();
+      if (!fromPath) {
+        throw new Error("--from requires a non-empty value");
+      }
+      i += 1;
+      continue;
     }
 
     if (arg.startsWith(NAME_FLAG_PREFIX)) {
@@ -361,10 +403,21 @@ function parseCliOptions(argv: string[]): CliOptions {
       throw new Error(`Unknown flag: ${arg}`);
     }
 
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown flag: ${arg}`);
+    }
+
     promptParts.push(arg);
   }
 
-  return { prompt: promptParts.join(" ").trim(), thinking, nameOverride, help: false };
+  return {
+    prompt: promptParts.join(" ").trim(),
+    thinking,
+    nameOverride,
+    webStore,
+    fromPath,
+    help: false,
+  };
 }
 
 function slugify(value: string): string {
@@ -715,14 +768,331 @@ function printColorSummary(manifest: ThemeManifest): void {
   }
 }
 
-async function buildWebStorePackage(manifestPath: string, zipPath: string): Promise<void> {
+function relativePathFromCwd(targetPath: string): string {
+  const rel = path.relative(process.cwd(), targetPath);
+  return rel && !rel.startsWith("..") ? rel : targetPath;
+}
+
+function rgbDistance(a: Rgb, b: Rgb): number {
+  const dr = a[0] - b[0];
+  const dg = a[1] - b[1];
+  const db = a[2] - b[2];
+  return Math.sqrt(dr * dr + dg * dg + db * db);
+}
+
+function rgbToHsl(rgb: Rgb): [number, number, number] {
+  const r = rgb[0] / 255;
+  const g = rgb[1] / 255;
+  const b = rgb[2] / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+
+  if (d === 0) {
+    return [0, 0, l];
+  }
+
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+
+  if (max === r) {
+    h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  } else if (max === g) {
+    h = ((b - r) / d + 2) / 6;
+  } else {
+    h = ((r - g) / d + 4) / 6;
+  }
+
+  return [h, s, l];
+}
+
+function relativeLuminance(rgb: Rgb): number {
+  const normalize = (channel: number) => {
+    const v = channel / 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  };
+
+  const r = normalize(rgb[0]);
+  const g = normalize(rgb[1]);
+  const b = normalize(rgb[2]);
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function inferThemeMode(manifest: ThemeManifest): "light" | "dark" {
+  const c = manifest.theme.colors;
+  const average = (relativeLuminance(c.frame) + relativeLuminance(c.toolbar) + relativeLuminance(c.ntp_background)) / 3;
+  return average >= 0.4 ? "light" : "dark";
+}
+
+function selectGradientPair(manifest: ThemeManifest): { start: Rgb; end: Rgb; startRole: string; endRole: string } {
+  const c = manifest.theme.colors;
+  const candidates: Array<{ role: string; rgb: Rgb }> = [
+    { role: "frame", rgb: c.frame },
+    { role: "frame_inactive", rgb: c.frame_inactive },
+    { role: "toolbar", rgb: c.toolbar },
+    { role: "bookmark_text", rgb: c.bookmark_text },
+    { role: "ntp_background", rgb: c.ntp_background },
+    { role: "ntp_link", rgb: c.ntp_link },
+    { role: "tab_text", rgb: c.tab_text },
+  ];
+
+  let bestPair: { start: Rgb; end: Rgb; startRole: string; endRole: string; score: number } | null = null;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const a = candidates[i];
+      const b = candidates[j];
+      const distance = rgbDistance(a.rgb, b.rgb);
+      const [, satA, lightA] = rgbToHsl(a.rgb);
+      const [, satB, lightB] = rgbToHsl(b.rgb);
+      const saturationBoost = ((satA + satB) / 2) * 140;
+      const lightnessSpread = Math.abs(lightA - lightB) * 80;
+      const accentBoost = a.role === "ntp_link" || b.role === "ntp_link" ? 30 : 0;
+      const frameBoost = a.role === "frame" || b.role === "frame" ? 12 : 0;
+      const score = distance * 0.65 + saturationBoost + lightnessSpread + accentBoost + frameBoost;
+
+      if (!bestPair || score > bestPair.score) {
+        bestPair = {
+          start: a.rgb,
+          end: b.rgb,
+          startRole: a.role,
+          endRole: b.role,
+          score,
+        };
+      }
+    }
+  }
+
+  if (!bestPair) {
+    return {
+      start: c.frame,
+      end: c.ntp_link,
+      startRole: "frame",
+      endRole: "ntp_link",
+    };
+  }
+
+  return {
+    start: bestPair.start,
+    end: bestPair.end,
+    startRole: bestPair.startRole,
+    endRole: bestPair.endRole,
+  };
+}
+
+async function writeGradientIcon(iconPath: string, start: Rgb, end: Rgb, size = 128): Promise<void> {
+  const png = new PNG({ width: size, height: size });
+  const denominator = Math.max(1, (size - 1) * 2);
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const t = (x + y) / denominator;
+      const r = Math.round(start[0] + (end[0] - start[0]) * t);
+      const g = Math.round(start[1] + (end[1] - start[1]) * t);
+      const b = Math.round(start[2] + (end[2] - start[2]) * t);
+      const idx = (size * y + x) << 2;
+      png.data[idx] = r;
+      png.data[idx + 1] = g;
+      png.data[idx + 2] = b;
+      png.data[idx + 3] = 255;
+    }
+  }
+
+  await Bun.write(iconPath, PNG.sync.write(png));
+}
+
+function normalizeAssetPathForZip(assetPath: string): string | null {
+  const normalized = assetPath.replace(/\\/g, "/").trim();
+  if (!normalized || normalized.startsWith("/") || normalized.includes("..")) {
+    return null;
+  }
+  return normalized;
+}
+
+function collectPackageAssets(manifest: ThemeManifest): string[] {
+  const files = new Set<string>(["manifest.json"]);
+  if (manifest.icons && typeof manifest.icons === "object") {
+    for (const value of Object.values(manifest.icons)) {
+      if (typeof value !== "string") {
+        continue;
+      }
+      const normalized = normalizeAssetPathForZip(value);
+      if (normalized) {
+        files.add(normalized);
+      }
+    }
+  }
+  return Array.from(files);
+}
+
+async function ensureAssetsExist(outputDir: string, assets: string[]): Promise<void> {
+  for (const asset of assets) {
+    const fullPath = path.join(outputDir, asset);
+    try {
+      await fs.access(fullPath);
+    } catch {
+      throw new Error(`Missing packaged asset: ${fullPath}`);
+    }
+  }
+}
+
+async function buildWebStorePackage(outputDir: string, zipPath: string, manifest: ThemeManifest): Promise<void> {
+  const assets = collectPackageAssets(manifest);
+  await ensureAssetsExist(outputDir, assets);
+  await fs.rm(zipPath, { force: true });
+
+  const proc = Bun.spawn(["zip", "-X", "-q", zipPath, ...assets], {
+    cwd: outputDir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text();
+    throw new Error(`Failed to create Chrome Web Store package: ${stderr.trim() || `zip exit code ${exitCode}`}`);
+  }
+}
+
+async function resolveExistingManifest(fromPath: string): Promise<{ manifestPath: string; outputDir: string }> {
+  const resolved = path.resolve(process.cwd(), fromPath);
+  let stats: Awaited<ReturnType<typeof fs.stat>>;
+
   try {
-    await Bun.$`rm -f ${zipPath}`;
-    await Bun.$`zip -X -j -q ${zipPath} ${manifestPath}`;
+    stats = await fs.stat(resolved);
+  } catch {
+    throw new Error(`--from path does not exist: ${fromPath}`);
+  }
+
+  if (stats.isDirectory()) {
+    const manifestPath = path.join(resolved, "manifest.json");
+    try {
+      await fs.access(manifestPath);
+    } catch {
+      throw new Error(`No manifest.json found in directory: ${resolved}`);
+    }
+    return { manifestPath, outputDir: resolved };
+  }
+
+  if (path.basename(resolved) !== "manifest.json") {
+    throw new Error("--from must point to a directory or a manifest.json file");
+  }
+
+  return { manifestPath: resolved, outputDir: path.dirname(resolved) };
+}
+
+async function loadManifestFromPath(manifestPath: string): Promise<ThemeManifest> {
+  let raw = "";
+  try {
+    raw = await Bun.file(manifestPath).text();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to create Chrome Web Store package: ${message}`);
+    throw new Error(`Failed to read manifest at ${manifestPath}: ${message}`);
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSON in ${manifestPath}: ${message}`);
+  }
+
+  const validationErrors = validateManifest(parsed);
+  if (validationErrors.length > 0) {
+    throw new Error(`Manifest validation failed for ${manifestPath}: ${validationErrors.join("; ")}`);
+  }
+
+  return parsed as ThemeManifest;
+}
+
+function buildListingDescriptionMarkdown(
+  manifest: ThemeManifest,
+  zipPath: string,
+  iconPath: string,
+  gradientStart: string,
+  gradientEnd: string,
+): string {
+  const mode = inferThemeMode(manifest);
+  const frame = rgbToHex(manifest.theme.colors.frame);
+  const toolbar = rgbToHex(manifest.theme.colors.toolbar);
+  const ntp = rgbToHex(manifest.theme.colors.ntp_background);
+  const link = rgbToHex(manifest.theme.colors.ntp_link);
+  const shortDescription = `${manifest.name} is a ${mode} Chromium theme with polished contrast and a cohesive color story.`;
+  const detailed = `${manifest.name} gives Chromium a cohesive ${mode} look with balanced frame, toolbar, and new-tab page colors. It keeps tabs readable while preserving the intended mood and accent energy.`;
+
+  return `# ${manifest.name} - Chrome Web Store Draft
+
+## Short Description
+
+${shortDescription}
+
+## Detailed Description
+
+${detailed}
+
+## Palette Notes
+
+- Frame: ${frame}
+- Toolbar: ${toolbar}
+- NTP Background: ${ntp}
+- NTP Link Accent: ${link}
+- Generated Icon Gradient: ${gradientStart} -> ${gradientEnd}
+
+## Generated Assets
+
+- Web Store zip: \`${relativePathFromCwd(zipPath)}\`
+- 128x128 icon: \`${relativePathFromCwd(iconPath)}\`
+
+## Publish Checklist
+
+- [ ] Upload zip in Chrome Web Store Developer Console
+- [ ] Upload 128x128 icon (or reuse generated icon)
+- [ ] Paste short and detailed descriptions
+- [ ] Add screenshots from Chromium with this theme loaded
+- [ ] Confirm listing category/tags before publishing
+`;
+}
+
+async function writeWebStoreDescriptionFiles(
+  manifest: ThemeManifest,
+  folderName: string,
+  zipPath: string,
+  iconPath: string,
+  gradientStart: string,
+  gradientEnd: string,
+): Promise<{ descriptionPath: string; metadataPath: string }> {
+  const descriptionsDir = path.join(process.cwd(), "descriptions");
+  await fs.mkdir(descriptionsDir, { recursive: true });
+
+  const descriptionPath = path.join(descriptionsDir, `${folderName}.md`);
+  const metadataPath = path.join(descriptionsDir, `${folderName}.json`);
+
+  const markdown = buildListingDescriptionMarkdown(manifest, zipPath, iconPath, gradientStart, gradientEnd);
+  await Bun.write(descriptionPath, `${markdown.trim()}\n`);
+
+  const metadata = {
+    name: manifest.name,
+    version: manifest.version,
+    mode: inferThemeMode(manifest),
+    files: {
+      zip: relativePathFromCwd(zipPath),
+      icon128: relativePathFromCwd(iconPath),
+      description: relativePathFromCwd(descriptionPath),
+    },
+    colors: {
+      frame: rgbToHex(manifest.theme.colors.frame),
+      toolbar: rgbToHex(manifest.theme.colors.toolbar),
+      ntp_background: rgbToHex(manifest.theme.colors.ntp_background),
+      ntp_link: rgbToHex(manifest.theme.colors.ntp_link),
+      icon_gradient: [gradientStart, gradientEnd],
+    },
+  };
+
+  await Bun.write(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+
+  return { descriptionPath, metadataPath };
 }
 
 async function fetchGenerationMetadata(
@@ -1036,6 +1406,8 @@ async function main(): Promise<void> {
   let input = "";
   let cliThinking: ThinkingConfig | null = null;
   let cliNameOverride: string | null = null;
+  let cliWebStore = false;
+  let cliFromPath: string | null = null;
   try {
     const parsed = parseCliOptions(Bun.argv.slice(2));
     if (parsed.help) {
@@ -1044,124 +1416,186 @@ async function main(): Promise<void> {
     input = parsed.prompt;
     cliThinking = parsed.thinking;
     cliNameOverride = parsed.nameOverride;
+    cliWebStore = parsed.webStore;
+    cliFromPath = parsed.fromPath;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(pc.red(message));
     usage();
   }
 
-  if (!input) {
+  if (cliFromPath && input) {
+    console.error(pc.red("Do not provide a prompt when using --from. Use one mode or the other."));
+    usage();
+  }
+
+  if (!cliFromPath && !input) {
     usage();
   }
 
   const configuredThinking = cliThinking;
   const apiKey = process.env.OPENROUTER_API_KEY;
+  let manifest: ThemeManifest;
+  let failedChecks: ContrastCheck[] = [];
+  let bestStream: StreamThemeResult | null = null;
+  let outputDir = "";
+  let manifestPath = "";
+  let fromExisting = false;
 
-  const modePreference = detectModePreference(input);
+  if (cliFromPath) {
+    fromExisting = true;
+    const resolved = await resolveExistingManifest(cliFromPath);
+    manifestPath = resolved.manifestPath;
+    outputDir = resolved.outputDir;
+    manifest = await loadManifestFromPath(manifestPath);
 
-  let retryFailedPairs: string[] = [];
-  let bestResult:
-    | {
-        manifest: ThemeManifest;
-        checks: ContrastCheck[];
-        stream: StreamThemeResult;
-      }
-    | undefined;
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-    if (attempt > 0) {
-      console.log(pc.yellow(`Retrying generation (${attempt}/${MAX_RETRIES})...`));
+    if (cliNameOverride) {
+      manifest.name = cliNameOverride;
     }
 
-    const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: buildUserMessage(input, retryFailedPairs, modePreference),
-      },
-    ];
-
-    let streamResult: StreamThemeResult;
-    try {
-      streamResult = await streamThemeManifest(messages, configuredThinking);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(pc.red(`Streaming failed: ${message}`));
-      process.exit(1);
-    }
-
-    const rawManifest = streamResult.rawManifest;
-
-    let parsedManifest: unknown;
-    try {
-      parsedManifest = JSON.parse(rawManifest);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(pc.red(`Failed to parse generated JSON: ${message}`));
-      console.error(pc.red("Raw output:"));
-      console.error(rawManifest);
-      process.exit(1);
-    }
-
-    const validationErrors = validateManifest(parsedManifest);
-    if (validationErrors.length > 0) {
-      console.error(pc.red("Validation failed:"));
-      for (const err of validationErrors) {
-        console.error(pc.red(`- ${err}`));
-      }
-      process.exit(1);
-    }
-
-    const manifest = parsedManifest as ThemeManifest;
-    manifest.name = cliNameOverride ?? normalizeGeneratedName(manifest.name);
     const checks = runContrastChecks(manifest);
-    const failedChecks = checks.filter((check) => !check.pass);
-
+    failedChecks = checks.filter((check) => !check.pass);
     printContrastTable(checks);
+  } else {
+    const modePreference = detectModePreference(input);
+    let retryFailedPairs: string[] = [];
+    let bestResult:
+      | {
+          manifest: ThemeManifest;
+          checks: ContrastCheck[];
+          stream: StreamThemeResult;
+        }
+      | undefined;
 
-    if (!bestResult || failedChecks.length < bestResult.checks.filter((c) => !c.pass).length) {
-      bestResult = { manifest, checks, stream: streamResult };
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        console.log(pc.yellow(`Retrying generation (${attempt}/${MAX_RETRIES})...`));
+      }
+
+      const messages: ChatMessage[] = [
+        { role: "system", content: SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: buildUserMessage(input, retryFailedPairs, modePreference),
+        },
+      ];
+
+      let streamResult: StreamThemeResult;
+      try {
+        streamResult = await streamThemeManifest(messages, configuredThinking);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(pc.red(`Streaming failed: ${message}`));
+        process.exit(1);
+      }
+
+      const rawManifest = streamResult.rawManifest;
+
+      let parsedManifest: unknown;
+      try {
+        parsedManifest = JSON.parse(rawManifest);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(pc.red(`Failed to parse generated JSON: ${message}`));
+        console.error(pc.red("Raw output:"));
+        console.error(rawManifest);
+        process.exit(1);
+      }
+
+      const validationErrors = validateManifest(parsedManifest);
+      if (validationErrors.length > 0) {
+        console.error(pc.red("Validation failed:"));
+        for (const err of validationErrors) {
+          console.error(pc.red(`- ${err}`));
+        }
+        process.exit(1);
+      }
+
+      const generatedManifest = parsedManifest as ThemeManifest;
+      generatedManifest.name = cliNameOverride ?? normalizeGeneratedName(generatedManifest.name);
+      const checks = runContrastChecks(generatedManifest);
+      const failed = checks.filter((check) => !check.pass);
+
+      printContrastTable(checks);
+
+      if (!bestResult || failed.length < bestResult.checks.filter((c) => !c.pass).length) {
+        bestResult = { manifest: generatedManifest, checks, stream: streamResult };
+      }
+
+      if (failed.length <= 2) {
+        break;
+      }
+
+      if (attempt < MAX_RETRIES) {
+        retryFailedPairs = failed.map((check) => check.label);
+        console.log(
+          pc.yellow(
+            `More than 2 contrast checks failed (${failed.length}). Requesting an accessibility-focused retry.`,
+          ),
+        );
+      }
     }
 
-    if (failedChecks.length <= 2) {
-      break;
+    if (!bestResult) {
+      console.error(pc.red("No valid theme manifest was produced."));
+      process.exit(1);
     }
 
-    if (attempt < MAX_RETRIES) {
-      retryFailedPairs = failedChecks.map((check) => check.label);
-      console.log(
-        pc.yellow(
-          `More than 2 contrast checks failed (${failedChecks.length}). Requesting an accessibility-focused retry.`,
-        ),
-      );
-    }
+    manifest = bestResult.manifest;
+    bestStream = bestResult.stream;
+    failedChecks = bestResult.checks.filter((check) => !check.pass);
+    const folderName = slugify(manifest.name);
+    outputDir = `${process.cwd()}/${folderName}`;
+    await fs.mkdir(outputDir, { recursive: true });
+    manifestPath = `${outputDir}/manifest.json`;
   }
 
-  if (!bestResult) {
-    console.error(pc.red("No valid theme manifest was produced."));
-    process.exit(1);
+  let iconPath: string | null = null;
+  let iconStartHex: string | null = null;
+  let iconEndHex: string | null = null;
+
+  if (cliWebStore) {
+    const iconFileName = "icon-128.png";
+    const gradientPair = selectGradientPair(manifest);
+    iconPath = path.join(outputDir, iconFileName);
+    iconStartHex = rgbToHex(gradientPair.start);
+    iconEndHex = rgbToHex(gradientPair.end);
+    await writeGradientIcon(iconPath, gradientPair.start, gradientPair.end, 128);
+    manifest.icons = {
+      ...(manifest.icons ?? {}),
+      "128": iconFileName,
+    };
   }
 
-  const manifest = bestResult.manifest;
-  const bestStream = bestResult.stream;
-  const failedChecks = bestResult.checks.filter((check) => !check.pass);
-  const folderName = slugify(manifest.name);
-  const outputDir = `${process.cwd()}/${folderName}`;
-  await Bun.$`mkdir -p ${outputDir}`;
-
-  const manifestPath = `${outputDir}/manifest.json`;
   await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const folderName = slugify(manifest.name);
   const webStoreZipPath = `${process.cwd()}/${folderName}-webstore.zip`;
 
   try {
-    await buildWebStorePackage(manifestPath, webStoreZipPath);
+    await buildWebStorePackage(outputDir, webStoreZipPath, manifest);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(pc.red(message));
     process.exit(1);
   }
 
-  console.log(pc.green("Theme manifest generated and validated successfully."));
+  let descriptionPath: string | null = null;
+  let metadataPath: string | null = null;
+  if (cliWebStore && iconPath && iconStartHex && iconEndHex) {
+    const written = await writeWebStoreDescriptionFiles(
+      manifest,
+      folderName,
+      webStoreZipPath,
+      iconPath,
+      iconStartHex,
+      iconEndHex,
+    );
+    descriptionPath = written.descriptionPath;
+    metadataPath = written.metadataPath;
+  }
+
+  console.log(pc.green(fromExisting ? "Existing theme processed successfully." : "Theme manifest generated and validated successfully."));
   console.log(pc.bold(pc.cyan(`Written: ${manifestPath}`)));
   console.log(pc.bold(pc.cyan(`Web Store package: ${webStoreZipPath}`)));
   console.log(
@@ -1169,6 +1603,16 @@ async function main(): Promise<void> {
       manifest.theme.colors.toolbar,
     )}, ntp_background=${rgbToHex(manifest.theme.colors.ntp_background)}`,
   );
+
+  if (iconPath && iconStartHex && iconEndHex) {
+    console.log(pc.bold(pc.cyan(`Icon: ${iconPath}`)));
+    console.log(`Icon gradient: ${iconStartHex} -> ${iconEndHex}`);
+  }
+
+  if (descriptionPath && metadataPath) {
+    console.log(pc.bold(pc.cyan(`Listing draft: ${descriptionPath}`)));
+    console.log(pc.bold(pc.cyan(`Publish metadata: ${metadataPath}`)));
+  }
 
   if (failedChecks.length > 0) {
     const labels = failedChecks.map((check) => check.label).join(", ");
@@ -1187,8 +1631,10 @@ async function main(): Promise<void> {
 
   printColorSummary(manifest);
 
-  const generation = await fetchGenerationMetadata(apiKey ?? "", bestStream.generationId);
-  printRequestSummary(bestStream, generation);
+  if (bestStream) {
+    const generation = await fetchGenerationMetadata(apiKey ?? "", bestStream.generationId);
+    printRequestSummary(bestStream, generation);
+  }
 }
 
 await main();

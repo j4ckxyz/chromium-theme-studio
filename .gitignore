@@ -8,3 +8,6 @@ node_modules
 # Generated theme output folders (top-level)
 /*/manifest.json
 /*/Cached Theme.pak
+/*/icon-*.png
+/*-webstore.zip
+/descriptions/
