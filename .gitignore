@@ -1,4 +1,10 @@
 .env
+.env.*
+!.env.example
 node_modules
 *.log
 *.DS_Store
+
+# Generated theme output folders (top-level)
+/*/manifest.json
+/*/Cached Theme.pak

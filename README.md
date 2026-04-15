@@ -35,6 +35,19 @@ A Bun CLI that generates polished Chromium browser themes from a text prompt usi
 bun run generate.ts "your theme description"
 ```
 
+Optional reasoning mode:
+
+```bash
+bun run generate.ts --thinking=high "your theme description"
+bun run generate.ts --thinking=off "your theme description"
+```
+
+Supported `--thinking` values: `xhigh`, `high`, `medium`, `low`, `minimal`, `none`, `off`.
+
+- Use `--thinking=<level>` for reasoning-capable models.
+- Use `--thinking=off` (or omit the flag) for non-reasoning mode.
+- If reasoning is requested but rejected by the model/provider, the CLI automatically retries without reasoning.
+
 Examples:
 
 ```bash
@@ -49,6 +62,7 @@ bun run generate.ts "deep forest, muted greens and browns"
 - Accumulates JSON output silently, then validates the manifest
 - Writes `manifest.json` to a slugified folder named after the generated theme
 - Prints key colors (`frame`, `toolbar`, `ntp_background`) as hex values
+- Prints concise API stats: model, thinking mode, token counts, timing, generation ID, and cost (when available)
 
 ## Load in Chromium
 
@@ -56,3 +70,9 @@ bun run generate.ts "deep forest, muted greens and browns"
 2. Turn on **Developer mode**
 3. Click **Load unpacked**
 4. Select the generated theme folder
+
+## Included example
+
+An example theme manifest is included at:
+
+- `examples/sour-sorbet-l/manifest.json`

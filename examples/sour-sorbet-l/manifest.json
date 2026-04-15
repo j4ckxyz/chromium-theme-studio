@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Sour Sorbet-l",
+  "version": "1.0",
+  "theme": {
+    "colors": {
+      "frame": [214, 198, 242],
+      "frame_inactive": [228, 218, 248],
+      "toolbar": [246, 238, 255],
+      "tab_text": [75, 25, 115],
+      "tab_background_text": [145, 120, 185],
+      "bookmark_text": [85, 35, 130],
+      "ntp_background": [250, 245, 255],
+      "ntp_text": [60, 20, 95],
+      "ntp_link": [155, 80, 230],
+      "button_background": [0, 0, 0, 0]
+    },
+    "tints": {
+      "buttons": [0.76, 0.35, 0.4],
+      "frame": [-1, -1, -1],
+      "frame_inactive": [-1, -1, 0.55]
+    },
+    "properties": {
+      "ntp_background_alignment": "bottom",
+      "ntp_logo_alternate": 1
+    }
+  }
+}
