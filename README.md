@@ -1,6 +1,6 @@
 # Chromium Theme Studio
 
-A Bun CLI that generates polished Chromium browser themes from a text prompt using the OpenRouter API.
+A Bun CLI that generates polished browser themes from a text prompt using the OpenRouter API. Every run produces both a Chromium manifest and a Firefox WebExtension static theme manifest automatically.
 
 ## Quickstart
 
@@ -126,6 +126,7 @@ bun run generate.ts "deep forest, muted greens and browns"
 - Can output an HTML side-by-side preview sheet for fast candidate review
 - Can capture publish-ready screenshots for CWS listing flow (macOS)
 - Writes `manifest.json` to a slugified folder named after the generated theme
+- **Automatically generates `firefox-manifest.json` in the same folder** via a second LLM call that maps Chromium colours to Firefox WebExtension static theme keys
 - Creates a ready-to-upload Chrome Web Store zip (`<theme-name>-webstore.zip`) containing manifest + icon assets
 - With `--web-store`, creates `icon-128.png`, `descriptions/<theme-name>.md`, and `descriptions/<theme-name>.json`
 - Prints key colors (`frame`, `toolbar`, `ntp_background`) as hex values
@@ -137,6 +138,13 @@ bun run generate.ts "deep forest, muted greens and browns"
 2. Turn on **Developer mode**
 3. Click **Load unpacked**
 4. Select the generated theme folder
+
+## Load in Firefox
+
+1. Open Firefox and go to `about:debugging`
+2. Click **This Firefox**
+3. Click **Load Temporary Add-on**
+4. Select the `firefox-manifest.json` file inside the generated theme folder
 
 ## Included example
 
