@@ -59,6 +59,17 @@ type ThemeManifest = {
   };
 };
 
+type FirefoxThemeManifest = {
+  manifest_version: number;
+  name: string;
+  version: string;
+  theme: {
+    colors: Record<string, unknown>;
+    images: Record<string, unknown>;
+    properties: Record<string, unknown>;
+  };
+};
+
 type ContrastLibrary = {
   ratio: (hex1: string, hex2: string) => number;
   score: (hex1: string, hex2: string) => string;
@@ -127,6 +138,7 @@ type ThemeProcessingResult = {
   screenshots: ScreenshotArtifacts | null;
   imageReference: ImageReferenceOutcome;
   fromExisting: boolean;
+  firefoxManifestPath: string | null;
 };
 
 type ChatUsage = {
@@ -293,6 +305,72 @@ Example 2 — Light theme ("Morning Linen"):
       "ntp_background_alignment": "bottom",
       "ntp_logo_alternate": 1
     }
+  }
+}`;
+
+const FIREFOX_SYSTEM_PROMPT = `You are an expert UI colour designer specialising in browser themes.
+You receive a Chromium theme manifest and map its colours to a Firefox WebExtension static theme manifest.
+Output ONLY valid JSON. No markdown, no explanation, no backticks — raw JSON only.
+
+Valid Firefox theme.colors keys (from MDN):
+- accentcolor (deprecated alias for frame)
+- bookmark_text
+- button_background_active
+- button_background_hover
+- frame
+- frame_inactive
+- icons
+- icons_attention
+- ntp_background
+- ntp_text
+- popup
+- popup_border
+- popup_highlight
+- popup_highlight_text
+- popup_text
+- sidebar
+- sidebar_border
+- sidebar_highlight
+- sidebar_highlight_text
+- sidebar_text
+- tab_background_separator
+- tab_background_text
+- tab_line
+- tab_loading
+- tab_selected
+- tab_text
+- tabbrowser_toolbar_top_separator
+- toolbar
+- toolbar_bottom_separator
+- toolbar_field
+- toolbar_field_border
+- toolbar_field_border_focus
+- toolbar_field_focus
+- toolbar_field_highlight
+- toolbar_field_highlight_text
+- toolbar_field_text
+- toolbar_field_text_focus
+- toolbar_text
+- toolbar_top_separator
+- toolbar_vertical_separator
+
+Rules:
+- Use RGB arrays [R, G, B] with integers 0-255 for all colour values.
+- Map the Chromium colours to the closest semantic Firefox equivalents.
+- Preserve the theme name from the input manifest.
+- Preserve the theme's mood, contrast ratios, and palette harmony.
+- Include all keys that have a sensible mapping; omit keys only when there is no reasonable equivalent.
+- Leave "images" as an empty object and "properties" as an empty object.
+
+Output structure — follow exactly:
+{
+  "manifest_version": 2,
+  "name": "<theme name>",
+  "version": "1.0",
+  "theme": {
+    "colors": { ... },
+    "images": {},
+    "properties": {}
   }
 }`;
 
@@ -996,6 +1074,49 @@ function validateManifest(data: unknown): string[] {
   return errors;
 }
 
+function validateFirefoxManifest(data: unknown): string[] {
+  const errors: string[] = [];
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return ["Root must be a JSON object"];
+  }
+
+  const manifest = data as Record<string, unknown>;
+
+  if (manifest.manifest_version !== 2) {
+    errors.push("manifest_version must be exactly 2");
+  }
+
+  if (typeof manifest.name !== "string" || manifest.name.trim() === "") {
+    errors.push("name must be a non-empty string");
+  }
+
+  if (typeof manifest.version !== "string" || manifest.version.trim() === "") {
+    errors.push("version must be a non-empty string");
+  }
+
+  const theme = manifest.theme;
+  if (typeof theme !== "object" || theme === null || Array.isArray(theme)) {
+    errors.push("theme must be an object");
+    return errors;
+  }
+
+  const themeObj = theme as Record<string, unknown>;
+
+  if (typeof themeObj.colors !== "object" || themeObj.colors === null || Array.isArray(themeObj.colors)) {
+    errors.push("theme.colors must be an object");
+  }
+
+  if (typeof themeObj.images !== "object" || themeObj.images === null || Array.isArray(themeObj.images)) {
+    errors.push("theme.images must be an object");
+  }
+
+  if (typeof themeObj.properties !== "object" || themeObj.properties === null || Array.isArray(themeObj.properties)) {
+    errors.push("theme.properties must be an object");
+  }
+
+  return errors;
+}
+
 function detectModePreference(input: string): ModePreference {
   const source = input.toLowerCase();
   const wantsLight =
@@ -1592,6 +1713,46 @@ async function generateManifestFromPrompt(options: {
   };
 }
 
+async function generateFirefoxManifest(
+  chromiumManifest: ThemeManifest,
+  configuredThinking: ThinkingConfig | null,
+): Promise<FirefoxThemeManifest> {
+  console.log(pc.cyan("Generating Firefox manifest..."));
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: FIREFOX_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: `Convert this Chromium theme manifest into a Firefox WebExtension static theme manifest. Preserve the exact theme name.
+
+${JSON.stringify(chromiumManifest, null, 2)}`,
+    },
+  ];
+
+  const stream = await streamThemeManifest(messages, configuredThinking, false);
+  const rawManifest = stream.rawManifest;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawManifest);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse generated Firefox JSON: ${message}\nRaw output:\n${rawManifest}`);
+  }
+
+  const validationErrors = validateFirefoxManifest(parsed);
+  if (validationErrors.length > 0) {
+    throw new Error(`Firefox manifest validation failed: ${validationErrors.join("; ")}`);
+  }
+
+  const firefoxManifest = parsed as FirefoxThemeManifest;
+  firefoxManifest.manifest_version = 2;
+  firefoxManifest.name = chromiumManifest.name;
+  firefoxManifest.version = "1.0";
+
+  return firefoxManifest;
+}
+
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
     await fs.access(targetPath);
@@ -1932,6 +2093,7 @@ async function writeThemeArtifacts(options: {
     screenshots: screenshotArtifacts,
     imageReference,
     fromExisting,
+    firefoxManifestPath: null,
   };
 }
 
@@ -1947,6 +2109,9 @@ function printResultSummary(result: ThemeProcessingResult, totalResults: number,
   );
   console.log(pc.bold(pc.cyan(`Written: ${result.manifestPath}`)));
   console.log(pc.bold(pc.cyan(`Web Store package: ${result.webStoreZipPath}`)));
+  if (result.firefoxManifestPath) {
+    console.log(pc.bold(pc.cyan(`Written: ${result.firefoxManifestPath}`)));
+  }
   console.log(
     `Key colours: frame=${rgbToHex(manifest.theme.colors.frame)}, toolbar=${rgbToHex(
       manifest.theme.colors.toolbar,
@@ -2519,7 +2684,17 @@ async function main(): Promise<void> {
         imageReference,
       });
 
-      results.push(result);
+      let firefoxManifestPath: string | null = null;
+      try {
+        const firefoxManifest = await generateFirefoxManifest(generated.manifest, configuredThinking);
+        firefoxManifestPath = path.join(result.outputDir, "firefox-manifest.json");
+        await Bun.write(firefoxManifestPath, `${JSON.stringify(firefoxManifest, null, 2)}\n`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.log(pc.yellow(`Firefox manifest generation failed: ${message}`));
+      }
+
+      results.push({ ...result, firefoxManifestPath });
     }
   }
 
