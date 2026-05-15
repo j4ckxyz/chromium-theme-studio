@@ -148,6 +148,56 @@ Outputs:
 - `midnight-forest-webstore.zip` — ready to upload
 - `descriptions/midnight-forest.md` — listing copy
 
+### Specify Colors Directly
+
+Pass exact hex colors without using the AI. The CLI auto-generates all other colors based on your inputs:
+
+```bash
+# Set just the frame color — everything else is derived
+bun run src/index.ts generate --color.frame=#2d1f3d --name "My Theme"
+
+# Set multiple specific colors
+bun run src/index.ts generate \
+  --color.frame=#1a0f28 \
+  --color.toolbar=#251735 \
+  --color.ntp-link=#ff6633 \
+  --name "Dark Ember"
+```
+
+
+No API call needed — fast, predictable, free.
+
+
+#### Available Color Flags
+
+| Flag | Aliases | Description |
+|---|---|---|
+| `--color.frame` | `#rrggbb` or `rgb(r,g,b)` | Window/frame background |
+| `--color.frame-inactive` | | Inactive frame (auto-derived if not set) |
+| `--color.toolbar` | | Toolbar color |
+| `--color.tab-text` | | Active tab text |
+| `--color.tab-background-text` | | Inactive tab text |
+| `--color.bookmark-text` | | Bookmark text |
+| `--color.ntp-background` | | New tab page background |
+| `--color.ntp-text` | | New tab page text |
+| `--color.ntp-link` | | New tab page link accent |
+| `--color.button-background` | | Button background |
+| `--color.buttons` | | Tint as `h,s,l` values -1 to 1 |
+| `--color.tint-frame` | | Frame tint |
+| `--color.tint-frame-inactive` | | Inactive frame tint |
+
+Short form: `-c.frame=#rrggbb`
+
+#### Auto-Derivation
+
+If you only set `--color.frame`, the CLI automatically computes:
+- **frame_inactive** — slightly lighter version of frame
+- **toolbar** — same as frame
+- **tab_text / ntp_text** — light text on dark frame, dark text on light frame
+- **ntp_background** — darker (dark mode) or lighter (light mode) than frame
+- **ntp_link** — blue accent on dark, warm blue on light
+- **tints** — sensible defaults for icon color shifting
+
 ### Include a Reference Image
 
 Pass a local file or URL to extract colors from:

@@ -24,6 +24,17 @@ import {
   type ExampleEntry,
 } from "./examples.js";
 import { addHistoryEntry, getHistoryEntries, getHistoryStats } from "./history.js";
+import {
+  buildManifestFromColors,
+  validateManifest,
+  rgbToHex,
+  swatch,
+  slugify,
+  type ThemeManifest,
+  type ContrastCheck,
+  type StreamThemeResult,
+  type ImageReferenceOutcome,
+} from "./manifest.js";
 
 // ─── ANSI Rainbow helpers ───────────────────────────────────────────────────
 const RAINBOW_ANSI = [
@@ -249,6 +260,7 @@ type CliOptions = {
   providerKey: string | null;
   providerModel: string | null;
   profile: string | null;
+  explicitColors: Record<string, string>;
 };
 
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
@@ -268,8 +280,20 @@ function parseCli(raw: string[]): CliOptions {
     providerKey: null,
     providerModel: null,
     profile: null,
+    explicitColors: {},
   };
-
+  const COLOR_ALIASES: Record<string, string> = {
+    "frame-inactive": "frame_inactive",
+    "tab-text": "tab_text",
+    "tab-background-text": "tab_background_text",
+    "bookmark-text": "bookmark_text",
+    "ntp-background": "ntp_background",
+    "ntp-text": "ntp_text",
+    "ntp-link": "ntp_link",
+    "button-background": "button_background",
+    "tint-frame": "tint_frame",
+    "tint-frame-inactive": "tint_frame_inactive",
+  };
   for (let i = 0; i < raw.length; i++) {
     const arg = raw[i];
     if (arg === "-h" || arg === "--help") { printHelp(0); }
@@ -340,8 +364,31 @@ function parseCli(raw: string[]): CliOptions {
     }
     if (arg.startsWith("--profile=")) { opts.profile = arg.slice(10); continue; }
 
+    // --color.<key>=<value> for explicit colors
+    if (arg.startsWith("--color.")) {
+      const rest = arg.slice(8);
+      const eqIdx = rest.indexOf("=");
+      if (eqIdx <= 0) throw new Error("--color.<key>=<value> requires a key and value");
+      const keyRaw = rest.slice(0, eqIdx);
+      const value = rest.slice(eqIdx + 1);
+      const key = COLOR_ALIASES[keyRaw] ?? keyRaw;
+      if (!value) throw new Error(`--color.${keyRaw}=<value> requires a value`);
+      opts.explicitColors[key] = value;
+      continue;
+    }
+    if (arg.startsWith("-c.")) {
+      const rest = arg.slice(3);
+      const eqIdx = rest.indexOf("=");
+      if (eqIdx <= 0) throw new Error("-c.<key>=<value> requires a key and value");
+      const keyRaw = rest.slice(0, eqIdx);
+      const value = rest.slice(eqIdx + 1);
+      const key = COLOR_ALIASES[keyRaw] ?? keyRaw;
+      opts.explicitColors[key] = value;
+      continue;
+    }
+
     if (arg.startsWith("--")) throw new Error(`Unknown flag: ${arg}`);
-    if (arg.startsWith("-")) throw new Error(`Unknown flag: ${arg}`);
+    if (arg.startsWith("-") && !arg.startsWith("-c.")) throw new Error(`Unknown flag: ${arg}`);
 
     opts.prompt = raw.slice(i).join(" ");
     break;
@@ -349,6 +396,15 @@ function parseCli(raw: string[]): CliOptions {
 
   if (opts.variations < 1 || opts.variations > MAX_VARIATIONS) {
     throw new Error(`--variations must be 1-${MAX_VARIATIONS}`);
+  }
+
+  // Allow no-prompt when explicit colors are provided
+  if (!opts.prompt && Object.keys(opts.explicitColors).length === 0 && !opts.from) {
+    throw new Error("Provide a prompt or use --color.* flags. Run with -h for help.");
+  }
+
+  if (opts.prompt && Object.keys(opts.explicitColors).length > 0) {
+    throw new Error("Cannot combine a prompt with --color.* flags. Use one or the other.");
   }
 
   return opts;
@@ -371,7 +427,18 @@ function printHelp(exit = 1): never {
   p(`  ${pc.cyan("-F, --firefox")}            Also generate Firefox manifest`);
   p(`  ${pc.cyan("-i, --image <path/url>")}   Reference image(s) for palette inspiration`);
   p(`  ${pc.cyan("-f, --from <path>")}        Re-process existing theme folder/manifest`);
-  p(`  ${pc.cyan("--thinking[=<level>]")}     Enable reasoning (xhigh|high|medium|low|minimal|none|off)\n`);
+  p(`  ${pc.cyan("--thinking[=<level>]")}     Enable reasoning (xhigh|high|medium|low|minimal|none|off)
+`);
+  p(`${pc.bold("COLOR options (direct mode — no LLM call):")}`);
+  p(`  ${pc.cyan("--color.frame=#rrggbb")}       Frame/window background color`);
+  p(`  ${pc.cyan("--color.toolbar=#rrggbb")}     Toolbar color`);
+  p(`  ${pc.cyan("--color.tab-text=#rrggbb")}     Active tab text color`);
+  p(`  ${pc.cyan("--color.ntp-background=#rrbbgg")}  New tab page background`);
+  p(`  ${pc.cyan("--color.ntp-text=#rrggbb")}     New tab page text color`);
+  p(`  ${pc.cyan("--color.ntp-link=#rrggbb")}    New tab page link color`);
+  p(`  ${pc.cyan("--color.buttons=h,s,l")}        Button tint [hue,sat,lightness] -1 to 1`);
+  p(`  ${pc.dim("  Short form: -c.frame=#rrggbb  |  Aliases: --color.frame-inactive, etc.")}
+`);
   p(`${pc.bold("PROVIDER options:")}`);
   p(`  ${pc.cyan("--provider-url <url>")}      API base URL (e.g. https://openrouter.ai/api/v1)`);
   p(`  ${pc.cyan("--provider-key <key>")}      API key (or set OPENROUTER_API_KEY env var)`);
@@ -650,7 +717,28 @@ async function cmdGenerate(rawArgs: string[]): Promise<void> {
     const checks = await runContrastChecks(manifest);
     printContrastTable(checks);
 
+
     const result = await writeThemeArtifacts(provider, manifest, checks, null, false, outputDir, manifestPath, opts);
+    results.push(result);
+  } else if (Object.keys(opts.explicitColors).length > 0) {
+    // Direct color mode — no LLM call needed
+    const hasColors = Object.keys(opts.explicitColors).length > 0;
+    console.log(pc.cyan(`Building theme from explicit colors (${Object.keys(opts.explicitColors).length} provided)...`));
+    if (opts.explicitColors.frame) {
+      console.log(pc.dim(`  frame: ${opts.explicitColors.frame}`));
+    }
+
+    const name = opts.name ?? "custom-theme";
+    const manifest = buildManifestFromColors(name, opts.explicitColors);
+    const validationErrors = validateManifest(manifest);
+    if (validationErrors.length > 0) {
+      throw new Error(`Manifest validation failed: ${validationErrors.join("; ")}`);
+    }
+
+    const checks = await runContrastChecks(manifest);
+    printContrastTable(checks);
+
+    const result = await writeThemeArtifacts(provider, manifest, checks, null, false, "", "", opts);
     results.push(result);
   } else {
     for (let vi = 1; vi <= opts.variations; vi++) {

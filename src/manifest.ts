@@ -1,4 +1,5 @@
 export type Rgb = [number, number, number];
+import path from "node:path";
 export type Rgba = [number, number, number, number];
 export type Tint = [number, number, number];
 
@@ -274,4 +275,163 @@ export function relativePathFromCwd(targetPath: string): string {
 
 export function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+export type ExplicitColors = {
+  frame?: string;
+  frame_inactive?: string;
+  toolbar?: string;
+  tab_text?: string;
+  tab_background_text?: string;
+  bookmark_text?: string;
+  ntp_background?: string;
+  ntp_text?: string;
+  ntp_link?: string;
+  button_background?: string;
+  buttons?: string;
+  tint_frame?: string;
+  tint_frame_inactive?: string;
+};
+
+/**
+ * Parse a hex string to [R, G, B]. Accepts "#rrggbb" or "rrggbb" or "rgb(r,g,b)"
+ */
+export function parseColor(value: string): [number, number, number] | null {
+  const stripped = value.replace("#", "").trim();
+  if (/^[0-9a-fA-F]{6}$/.test(stripped)) {
+    return hexToRgb(stripped);
+  }
+  const rgbMatch = stripped.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/i);
+  if (rgbMatch) {
+    return [parseInt(rgbMatch[1]), parseInt(rgbMatch[2]), parseInt(rgbMatch[3])];
+  }
+  return null;
+}
+
+/**
+ * Parse a tint string "h,s,l" where each value is -1.0 to 1.0
+ */
+export function parseTint(value: string): [number, number, number] | null {
+  const parts = value.split(",").map((p) => parseFloat(p.trim()));
+  if (parts.length !== 3 || parts.some((v) => isNaN(v) || v < -1 || v > 1)) {
+    return null;
+  }
+  return parts as [number, number, number];
+}
+
+
+/**
+ * Build a complete ThemeManifest from explicit color values.
+ * Colors not provided are auto-derived from provided ones.
+ */
+export function buildManifestFromColors(
+  name: string,
+  colors: ExplicitColors
+): ThemeManifest {
+  const hex = (v: string) => {
+    const rgb = parseColor(v);
+    if (!rgb) throw new Error(`Invalid color: ${v}`);
+    return rgb;
+  };
+
+  // Frame must always be provided
+  const frame = hex(colors.frame ?? "#1a1218");
+  const frameHex = rgbToHex(frame);
+
+  // Auto-derive inactive frame (slightly lighter)
+  const frame_inactive = colors.frame_inactive
+    ? hex(colors.frame_inactive)
+    : ([Math.min(255, frame[0] + 10), Math.min(255, frame[1] + 10), Math.min(255, frame[2] + 15)] as [number, number, number]);
+
+  // Toolbar defaults to frame color
+  const toolbar = colors.toolbar ? hex(colors.toolbar) : [...frame];
+
+
+  // Auto-generate text colors based on frame luminance
+  const luminance = (rgb: [number, number, number]) =>
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  const isDark = luminance(frame) < 128;
+
+  const tab_text = colors.tab_text
+    ? hex(colors.tab_text)
+    : isDark
+      ? ([235, 230, 250] as [number, number, number])
+      : ([20, 15, 35] as [number, number, number]);
+
+
+  const tab_background_text = colors.tab_background_text
+    ? hex(colors.tab_background_text)
+    : isDark
+      ? ([130, 120, 170] as [number, number, number])
+      : ([100, 95, 80] as [number, number, number]);
+
+  const bookmark_text = colors.bookmark_text
+    ? hex(colors.bookmark_text)
+    : isDark
+      ? ([210, 205, 240] as [number, number, number])
+      : ([50, 40, 25] as [number, number, number]);
+
+
+  // NTP background defaults to darker version of frame
+  const ntp_background = colors.ntp_background
+    ? hex(colors.ntp_background)
+    : isDark
+      ? ([Math.max(0, frame[0] - 8), Math.max(0, frame[1] - 8), Math.max(0, frame[2] - 8)] as [number, number, number])
+      : ([Math.min(255, frame[0] + 15), Math.min(255, frame[1] + 15), Math.min(255, frame[2] + 15)] as [number, number, number]);
+
+
+  const ntp_text = colors.ntp_text
+    ? hex(colors.ntp_text)
+    : tab_text;
+
+  const ntp_link = colors.ntp_link
+    ? hex(colors.ntp_link)
+    : isDark
+      ? ([100, 160, 230] as [number, number, number])
+      : ([30, 80, 180] as [number, number, number]);
+
+  const button_background = colors.button_background
+    ? [...hex(colors.button_background), 0.0] as [number, number, number, number]
+    : (isDark ? ([255, 255, 255, 0.0] as [number, number, number, number]) : ([0, 0, 0, 0.0] as [number, number, number, number]));
+
+
+  // Tints: buttons from frame hue, frame inactive from luminance, rest neutral
+  const buttons = colors.buttons
+    ? parseTint(colors.buttons) ?? ([-1, -1, -1] as [number, number, number])
+    : ([-1, -1, -1] as [number, number, number]);
+  const tint_frame = colors.tint_frame
+    ? parseTint(colors.tint_frame) ?? ([-1, -1, -1] as [number, number, number])
+    : ([-1, -1, -1] as [number, number, number]);
+  const tint_frame_inactive = colors.tint_frame_inactive
+    ? parseTint(colors.tint_frame_inactive) ?? ([-1, -1, 0.5] as [number, number, number])
+    : ([-1, -1, 0.5] as [number, number, number]);
+
+  return {
+    manifest_version: 3,
+    name: name.trim() || "Custom Theme",
+    version: "1.0",
+    theme: {
+      colors: {
+        frame,
+        frame_inactive,
+        toolbar,
+        tab_text,
+        tab_background_text,
+        bookmark_text,
+        ntp_background,
+        ntp_text,
+        ntp_link,
+        button_background,
+      },
+      tints: {
+        buttons,
+        frame: tint_frame,
+        frame_inactive: tint_frame_inactive,
+      },
+      properties: {
+        ntp_background_alignment: "bottom",
+        ntp_logo_alternate: 1,
+      },
+    },
+  };
 }
