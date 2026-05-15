@@ -1,9 +1,10 @@
-import pc from "picocolors";
+import contrastLib from "get-contrast";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { PNG } from "pngjs";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
+import pc from "picocolors";
 
 import {
   loadConfig, getProviderFromConfig, parseThinkingValue,
