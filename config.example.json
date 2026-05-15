@@ -1,0 +1,54 @@
+{
+  "defaultProvider": {
+    "url": "https://openrouter.ai/api/v1",
+    "key": "env:OPENROUTER_API_KEY",
+    "model": "anthropic/claude-3.7-sonnet"
+  },
+  "profiles": {
+    "openrouter": {
+      "url": "https://openrouter.ai/api/v1",
+      "key": "env:OPENROUTER_API_KEY",
+      "model": "anthropic/claude-3.7-sonnet"
+    },
+    "openai": {
+      "url": "https://api.openai.com/v1",
+      "key": "env:OPENAI_API_KEY",
+      "model": "gpt-4o"
+    },
+    "azure": {
+      "url": "https://YOUR_RESOURCE.openai.azure.com/v1",
+      "key": "env:AZURE_OPENAI_KEY",
+      "model": "gpt-4o"
+    },
+    "ollama": {
+      "url": "http://localhost:11434/v1",
+      "key": "env:OLLAMA_API_KEY",
+      "model": "llama3"
+    },
+    "groq": {
+      "url": "https://api.groq.com/openai/v1",
+      "key": "env:GROQ_API_KEY",
+      "model": "llama-3.3-70b-versatile"
+    },
+    "deepseek": {
+      "url": "https://api.deepseek.com/v1",
+      "key": "env:DEEPSEEK_API_KEY",
+      "model": "deepseek-chat"
+    },
+    "anthropic-bedrock": {
+      "url": "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-7-sonnet-20250219/v1",
+      "key": "env:AWS_ACCESS_KEY_ID:AWS_SECRET_ACCESS_KEY",
+      "model": "anthropic.claude-3-7-sonnet-20250219"
+    },
+    "vertex": {
+      "url": "https://us-central1-aiplatform.googleapis.com/v1/projects/YOUR_PROJECT/locations/us-central1/publishers/anthropic/models/claude-3-7-sonnet-20250219:predict",
+      "key": "env:VERTEX_AI_TOKEN",
+      "model": "claude-3-7-sonnet@20250219"
+    }
+  },
+  "defaults": {
+    "variations": 1,
+    "webStore": false,
+    "firefox": false
+  }
+}

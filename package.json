@@ -1,14 +1,25 @@
 {
-  "name": "theme-gen",
-  "version": "1.0.0",
-  "private": true,
+  "name": "chromium-theme-studio",
+  "version": "2.0.0",
+  "description": "Advanced CLI for generating Chromium/Firefox themes via LLM — custom providers, bulk generation, examples catalog, and history tracking.",
   "type": "module",
+  "bin": {
+    "ctm": "./src/index.ts"
+  },
   "scripts": {
-    "generate": "bun run generate.ts"
+    "dev": "bun run src/index.ts",
+    "generate": "bun run src/index.ts generate",
+    "examples": "bun run src/index.ts examples",
+    "history": "bun run src/index.ts history",
+    "config": "bun run src/index.ts config",
+    "help": "bun run src/index.ts --help"
   },
   "dependencies": {
     "get-contrast": "^3.0.0",
     "picocolors": "^1.1.1",
     "pngjs": "^7.0.0"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
   }
 }
