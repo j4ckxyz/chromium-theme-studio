@@ -9,7 +9,7 @@ Chromium Theme Studio is a CLI tool that generates Chromium and Firefox browser 
 ## Table of Contents
 
 - [Install](#install)
-- [Quick Start](#quick-start)
+- [Make Your First Theme](#make-your-first-theme)
 - [Commands](#commands)
 - [Providers](#providers)
 - [Config Profiles](#config-profiles)
@@ -22,30 +22,171 @@ Chromium Theme Studio is a CLI tool that generates Chromium and Firefox browser 
 ## Install
 
 ```bash
-git clone <repo-url>
-cd chromium-theme-maker
+git clone https://github.com/j4ckxyz/chromium-theme-studio.git
+cd chromium-theme-studio
 bun install
 ```
 
-Requirements: [Bun](https://bun.sh) (runtime), an OpenAI-compatible API key
+Requirements: [Bun](https://bun.sh) (runtime), an API key from any OpenAI-compatible provider
 
 ---
 
-## Quick Start
+## Make Your First Theme
+
+### Step 1: Set Your API Key
+
+Create a `.ctm.json` file in the project directory with your credentials:
 
 ```bash
-# Generate a theme from a text prompt
-bun run src/index.ts generate "warm sunset, orange and amber, dark background"
-
-# With Chrome Web Store assets
-bun run src/index.ts generate "coastal dawn, teal and peach" --web-store
-
-# Multiple variations
-bun run src/index.ts generate "neon city vibes" -v 6 --preview-sheet
-
-# Use a specific model
-bun run src/index.ts generate "minimal monochrome" --provider-model anthropic/claude-sonnet-4
+cat > .ctm.json << 'EOF'
+{
+  "defaultProvider": {
+    "url": "https://openrouter.ai/api/v1",
+    "key": "env:OPENROUTER_API_KEY",
+    "model": "anthropic/claude-3.7-sonnet"
+  }
+}
+EOF
 ```
+
+Then export your key:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+> **Tip:** You can also pass the key directly via CLI (see [Providers](#providers) below), or copy `config.example.json` to `~/.config/ctm/config.json` for a persistent global setup.
+
+### Step 2: Generate a Theme
+
+```bash
+bun run src/index.ts generate "warm sunset, orange and amber, dark background"
+```
+
+The CLI will:
+1. Send your prompt to the AI model
+2. Stream the model's reasoning to the terminal
+3. Validate the generated theme colors
+4. Write the theme to a folder
+
+You'll see output like:
+
+```
+  ╔══════════════════════════════════════════════╗
+  ║      Chromium Theme Studio v2              ║
+  ╚══════════════════════════════════════════════╝
+
+Contrast checks:
+✅ | Tab text on toolbar | 4.2:1 | AA
+✅ | Inactive tab text on frame | 2.8:1 | AA
+✅ | Bookmark text on toolbar | 3.1:1 | AA
+✅ | NTP text on background | 5.4:1 | AAA
+✅ | NTP link on background | 3.2:1 | AA
+
+Color summary:
+  ████  #1a1218  frame
+  ████  #252030  frame_inactive
+  ████  #2a1f22  toolbar
+  ████  #f5e0c0  tab_text
+  ████  #c08060  tab_background_text
+  ████  #e8c090  bookmark_text
+  ████  #120d10  ntp_background
+  ████  #f0e0c8  ntp_text
+  ████  #ff9040  ntp_link
+
+Theme written.
+  ./warm-sunset-2
+  Web store zip: ./warm-sunset-2-webstore.zip
+```
+
+### Step 3: Load It in Your Browser
+
+**Chromium:**
+1. Open `chrome://extensions`
+2. Enable **Developer mode** (top right toggle)
+3. Click **Load unpacked**
+4. Select the `warm-sunset-2` folder
+
+**Firefox:**
+1. Open `about:debugging`
+2. Click **This Firefox**
+3. Click **Load Temporary Add-on**
+4. Select `warm-sunset-2/firefox-manifest.json`
+
+---
+
+## More Examples
+
+### Name Your Theme
+
+```bash
+bun run src/index.ts generate "ocean waves, teal and white" --name "Ocean Drift"
+```
+
+This creates a folder called `ocean-drift/` instead of auto-generating a name.
+
+### Generate Multiple Variations
+
+Want 4 different takes on the same idea? Use `-v`:
+
+```bash
+bun run src/index.ts generate "electric candy, neon on dark" -v 4 --preview-sheet
+```
+
+This generates 4 candidate themes and writes an HTML preview sheet at `previews/`.
+
+### Add Web Store Assets
+
+Want a Chrome Web Store-ready icon, zip, and listing draft? Add `-w`:
+
+```bash
+bun run src/index.ts generate "midnight forest, deep green" -w
+```
+
+Outputs:
+- `midnight-forest/icon-128.png` — gradient icon
+- `midnight-forest-webstore.zip` — ready to upload
+- `descriptions/midnight-forest.md` — listing copy
+
+### Include a Reference Image
+
+Pass a local file or URL to extract colors from:
+
+```bash
+bun run src/index.ts generate "the mood of this photo" -i ./sunset.jpg
+```
+
+### Re-process an Existing Theme
+
+Modify an already-generated theme without regenerating colors:
+
+```bash
+bun run src/index.ts generate -f ./my-theme --name "My Theme Updated" -w
+```
+
+This re-runs the web store packaging and adds Firefox manifest.
+
+### Use a Different Model
+
+```bash
+bun run src/index.ts generate "minimal monochrome" --provider-model gpt-4o
+```
+
+Or use a saved profile:
+
+```bash
+bun run src/index.ts generate "fast and cheap" -P groq
+```
+
+### Enable Thinking Mode
+
+Some models support reasoning. Enable it with `--thinking`:
+
+```bash
+bun run src/index.ts generate "retro synthwave" --thinking=high
+```
+
+Supported levels: `xhigh`, `high`, `medium`, `low`, `minimal`, `none`, `off`.
 
 ---
 
@@ -73,51 +214,9 @@ bun run src/index.ts generate "minimal monochrome" --provider-model anthropic/cl
 | `-f, --from <path>` | Re-process an existing theme folder |
 | `--thinking[=<level>]` | Enable reasoning (xhigh/high/medium/low/minimal/none/off) |
 | `-P, --profile <name>` | Use a saved provider profile |
-| `--provider-url <url>` | API base URL (e.g. `https://api.groq.com/openai/v1`) |
+| `--provider-url <url>` | API base URL |
 | `--provider-key <key>` | API key |
-| `--provider-model <model>` | Model ID (e.g. `gpt-4o`, `llama-3.3-70b-versatile`) |
-
-### Examples
-
-```bash
-# Basic
-bun run src/index.ts generate "deep forest greens, dark mode"
-
-# Explicit name and web store assets
-bun run src/index.ts generate "midnight meadow" --name "Midnight Meadow" --web-store
-
-# Multiple variations with preview sheet
-bun run src/index.ts generate "electric candy" -v 6 -p --web-store
-
-# From existing theme
-bun run src/index.ts generate -f ./my-theme --screenshots
-
-# Reasoning mode
-bun run src/index.ts generate "minimal monochrome" --thinking=high
-```
-
-### History
-
-```bash
-ctm history                    # Recent generations
-ctm history --stats           # Top models, most-used flags
-ctm history --search sunset    # Search by prompt or theme name
-ctm history --limit 50         # Show more entries
-```
-
-### Config
-
-```bash
-ctm config                     # List current profiles
-ctm config --add my-groq \
-  --url https://api.groq.com/openai/v1 \
-  --key $GROQ_API_KEY \
-  --model llama-3.3-70b-versatile \
-  --default
-
-# Use a saved profile
-bun run src/index.ts generate "my theme" -P my-groq
-```
+| `--provider-model <model>` | Model ID |
 
 ---
 
@@ -125,15 +224,14 @@ bun run src/index.ts generate "my theme" -P my-groq
 
 Chromium Theme Studio works with any **OpenAI-compatible API**. Set credentials in any of these ways:
 
-### 1. Environment Variables
+### Option 1: Environment Variables
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
+export OPENROUTER_API_KEY=sk-or-v1-...
 export OPENROUTER_MODEL=anthropic/claude-3.7-sonnet
-export OPENROUTER_API_BASE_URL=https://openrouter.ai/api/v1
 ```
 
-### 2. Config File
+### Option 2: Config File
 
 Copy the example and edit:
 
@@ -141,9 +239,9 @@ Copy the example and edit:
 cp config.example.json ~/.config/ctm/config.json
 ```
 
-Then edit `~/.config/ctm/config.json`. See [Config Profiles](#config-profiles) below.
+Then edit `~/.config/ctm/config.json`. The `key` field supports `env:VARNAME` syntax to reference env vars without hardcoding secrets.
 
-### 3. CLI Flags (per-run)
+### Option 3: CLI Flags (per-run)
 
 ```bash
 bun run src/index.ts generate "my theme" \
@@ -165,89 +263,45 @@ bun run src/index.ts generate "my theme" \
 | Anthropic Bedrock | `https://bedrock-runtime.us-east-1.amazonaws.com/...` | `anthropic.claude-3-7-sonnet-...` | `AWS_ACCESS_KEY_ID` |
 | Vertex AI | `https://us-central1-aiplatform.googleapis.com/...` | `claude-3-7-sonnet@...` | `VERTEX_AI_TOKEN` |
 
-> **Note:** Provider configs can reference env vars using `env:VARNAME` syntax. Example: `"key": "env:OPENROUTER_API_KEY"`. This keeps secrets out of config files.
-
 ---
 
 ## Config Profiles
 
-Profiles let you save provider configurations and switch between them quickly.
-
-### Config File Locations
-
-- **Local:** `.ctm.json` (in your project directory — overrides global)
-- **Global:** `~/.config/ctm/config.json`
-
-### Profile Structure
-
-```json
-{
-  "defaultProvider": {
-    "url": "https://openrouter.ai/api/v1",
-    "key": "env:OPENROUTER_API_KEY",
-    "model": "anthropic/claude-3.7-sonnet"
-  },
-  "profiles": {
-    "groq": {
-      "url": "https://api.groq.com/openai/v1",
-      "key": "env:GROQ_API_KEY",
-      "model": "llama-3.3-70b-versatile"
-    }
-  }
-}
-```
-
-### Adding a Profile
+Save provider configurations and switch between them quickly.
 
 ```bash
+# Add a profile
 ctm config --add groq \
   --url https://api.groq.com/openai/v1 \
   --key $GROQ_API_KEY \
   --model llama-3.3-70b-versatile \
   --default
-```
 
-Then use it with:
-
-```bash
+# Use it
 bun run src/index.ts generate "my theme" -P groq
 ```
+
+### Config File Locations
+
+- **Local:** `.ctm.json` (in project directory — overrides global)
+- **Global:** `~/.config/ctm/config.json`
 
 ---
 
 ## Examples Catalog
 
-The `examples` command shows real themes with the exact commands used to generate them.
-
-### Browse All Examples
+See real themes with the exact commands used to generate them.
 
 ```bash
+# List all examples
 bun run src/index.ts examples
-```
 
-### Filter by Name or Tag
-
-```bash
-# By slug
-bun run src/index.ts examples obsidian-dusk
+# By name
+bun run src/index.ts examples electric-zest
 
 # By tag
 bun run src/index.ts examples dark
 bun run src/index.ts examples warm
-```
-
-### Example Output
-
-```
-── Electric Zest ──
-  Description: Vibrant citrus and neon accents on a dark canvas
-  Tags: dark, neon, colorful
-  Prompt: "electric zest, sour candy neon, lime and tangerine on dark graphite"
-
-  Command:
-    ctm generate --variations 3 --preview-sheet --web-store "electric zest..."
-
-  Flags: --variations 3 --preview-sheet --web-store
 ```
 
 ### Available Examples
@@ -267,7 +321,7 @@ bun run src/index.ts examples warm
 
 ## History
 
-Every generation is logged to `~/.config/ctm/history.json`. Track what you've made, which models performed best, and how much it cost.
+Every generation is logged. Track what you've made, which models performed best, and costs.
 
 ```bash
 # Recent themes
@@ -311,5 +365,21 @@ src/
   examples.ts    # Example catalog with commands
   history.ts     # JSON-based history store
 
-config.example.json    # Example config with all provider profiles
+config.example.json    # Example config with all provider presets
 ```
+
+---
+
+## Troubleshooting
+
+**"Missing OPENROUTER_API_KEY"**
+Set your API key: `export OPENROUTER_API_KEY=sk-or-...` or add it to `.ctm.json`.
+
+**"Model not found"**
+Check the model name. For OpenRouter, use the full ID like `anthropic/claude-3.7-sonnet`. For Groq, try `llama-3.3-70b-versatile`.
+
+**Theme looks wrong in the browser**
+Chromium caches themes aggressively. After loading, open `chrome://settings/appearance` and switch to a different theme, then back to yours.
+
+**Contrast checks failing**
+The CLI retries automatically up to 2 times with accessibility-focused feedback. If checks still fail, the theme is still written — you can iterate with `--from` to tweak it.
