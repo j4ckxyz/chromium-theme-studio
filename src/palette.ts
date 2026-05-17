@@ -16,17 +16,19 @@ export function generatePalette(seed: PaletteSeed): InternalPalette {
   const base_dark = seed.base_color;
   
   // Inactive Frame (base_mid) - slight hue drift (5-12°) and lightness shift
+  // In balanced/muted modes, ensure we preserve the subtle saturation to avoid pure grey
   const drift = mode === "monochrome" ? 0 : 7;
-  const base_mid = hslToRgb(bh + drift, bs, Math.min(100, bl + 5));
+  const targetSat = (mode === "balanced" || mode === "muted") ? Math.max(bs, 4) : bs;
+  const base_mid = hslToRgb(bh + drift, targetSat, Math.min(100, bl + 5));
   
   // Toolbar (surface_tint_1) - further drift and lighter
-  const surface_tint_1 = hslToRgb(bh + drift * 2, Math.max(0, bs - 5), Math.min(100, bl + 10));
+  const surface_tint_1 = hslToRgb(bh + drift * 2, Math.max(0, targetSat - 2), Math.min(100, bl + 10));
   
   // Tab Surface (base_light) - if dark theme, much lighter; if light theme, much darker
   const isDark = bl < 50;
   const base_light = isDark 
-    ? hslToRgb(bh, Math.max(0, bs - 10), Math.min(100, bl + 80))
-    : hslToRgb(bh, Math.max(0, bs - 10), Math.max(0, bl - 80));
+    ? hslToRgb(bh, Math.max(0, targetSat - 5), Math.min(100, bl + 80))
+    : hslToRgb(bh, Math.max(0, targetSat - 5), Math.max(0, bl - 80));
 
   // Accents
   const accent_primary = seed.accent_color;

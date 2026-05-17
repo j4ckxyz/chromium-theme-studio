@@ -81,6 +81,16 @@ No markdown, no explanation, no backticks — raw JSON only.
 
 You must apply professional colour theory principles to select the core SEED colours.
 
+AESTHETIC GOALS:
+- Aggressively push for high-end, vibrant, and cohesive colour theory.
+- BAN THE "AI COLOUR PALETTE": Forbid generic default fallbacks like garish neon purple-to-pink or basic cyan/grey unless explicitly requested.
+- SUBCONSCIOUS COHESION: The "base_color" (neutral/background) MUST NEVER be pure dead gray, pure black (#000000), or pure white (#FFFFFF). 
+- It MUST be subtly tinted toward the "primary_hue" (e.g., deep midnight ink, espresso, or tinted charcoal).
+- PERCEPTUAL HARMONY: The "accent_color" must be the strongest expression of the theme but must harmonize gracefully with the base color without looking "computed" or muddy.
+- MODE AWARENESS: 
+  - Dark modes: Use rich, deep, beautiful dark tones (deep navy, charcoal, rich plum, forest shadow).
+  - Light modes: Use soft, warm, or crisp tinted linens/slates.
+
 OUTPUT STRUCTURE — follow exactly:
 {
   "name": "<evocative theme name>",
@@ -98,21 +108,30 @@ RULES:
 - All RGB values: integers 0–255.
 - Raw JSON only — nothing else in your response.`;
 
-const FEW_SHOT_EXAMPLES = `Example 1 — Dark theme ("Obsidian Dusk"):
+const FEW_SHOT_EXAMPLES = `Example 1 — Dark theme ("Midnight Ink"):
 {
-  "name": "Obsidian Dusk",
-  "primary_hue": 240,
-  "base_color": [18, 18, 28],
-  "accent_color": [140, 120, 240],
+  "name": "Midnight Ink",
+  "primary_hue": 220,
+  "base_color": [24, 28, 38],
+  "accent_color": [100, 160, 255],
   "mode": "balanced"
 }
 
-Example 2 — Light theme ("Morning Linen"):
+Example 2 — Light theme ("Winter Linen"):
 {
-  "name": "Morning Linen",
-  "primary_hue": 40,
-  "base_color": [235, 228, 215],
-  "accent_color": [140, 90, 30],
+  "name": "Winter Linen",
+  "primary_hue": 210,
+  "base_color": [245, 247, 250],
+  "accent_color": [60, 110, 180],
+  "mode": "balanced"
+}
+
+Example 3 — Warm Dark ("Espresso Shadow"):
+{
+  "name": "Espresso Shadow",
+  "primary_hue": 25,
+  "base_color": [32, 28, 24],
+  "accent_color": [220, 140, 80],
   "mode": "balanced"
 }`;
 
@@ -450,6 +469,51 @@ function buildUserMessage(input: string, failedPairs: string[], mode: "light" | 
   return parts.join("\n\n");
 }
 
+function generateMockBrowserSvg(manifest: ThemeManifest): string {
+  const c = manifest.theme.colors;
+  const frame = rgbToHex(c.frame);
+  const toolbar = rgbToHex(c.toolbar);
+  const activeTab = toolbar;
+  const activeTabText = rgbToHex(c.tab_text);
+  const inactiveTab = rgbToHex(c.frame_inactive);
+  const inactiveTabText = rgbToHex(c.tab_background_text);
+  const ntpBg = rgbToHex(c.ntp_background);
+  const ntpLink = rgbToHex(c.ntp_link);
+
+  const svg = `
+<svg width="800" height="600" viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
+  <!-- Window Frame -->
+  <rect width="800" height="600" fill="${frame}" />
+  
+  <!-- Tabs Area -->
+  <rect x="0" y="0" width="800" height="40" fill="${frame}" />
+  
+  <!-- Inactive Tab -->
+  <path d="M 10 40 L 30 10 L 170 10 L 190 40 Z" fill="${inactiveTab}" />
+  <text x="100" y="30" font-family="sans-serif" font-size="12" fill="${inactiveTabText}" text-anchor="middle">Inactive Tab</text>
+  
+  <!-- Active Tab -->
+  <path d="M 180 40 L 200 10 L 340 10 L 360 40 Z" fill="${activeTab}" />
+  <text x="270" y="30" font-family="sans-serif" font-size="12" fill="${activeTabText}" text-anchor="middle">Active Tab</text>
+  
+  <!-- Toolbar -->
+  <rect x="0" y="40" width="800" height="50" fill="${toolbar}" />
+  
+  <!-- URL Bar -->
+  <rect x="100" y="50" width="600" height="30" rx="15" fill="${frame}" opacity="0.5" />
+  <text x="120" y="70" font-family="sans-serif" font-size="14" fill="${activeTabText}" opacity="0.8">https://google.com</text>
+  
+  <!-- NTP Area -->
+  <rect x="0" y="90" width="800" height="510" fill="${ntpBg}" />
+  <circle cx="400" cy="250" r="40" fill="${ntpLink}" />
+  <text x="400" y="320" font-family="sans-serif" font-size="24" fill="${ntpLink}" text-anchor="middle" font-weight="bold">New Tab Page</text>
+</svg>
+`.trim();
+
+  const base64 = Buffer.from(svg).toString("base64");
+  return `data:image/svg+xml;base64,${base64}`;
+}
+
 async function generateTheme(
   provider: ResolvedProvider,
   prompt: string,
@@ -487,6 +551,45 @@ async function generateTheme(
       }
     } catch (e) {
       throw new Error(`Failed to parse or validate generated SeedPalette. ${e.message}\nRaw:\n${stream.rawManifest.slice(0, 500)}`);
+    }
+
+    // --- Vision Feedback Loop ---
+    const canUseVision = await modelSupportsImageInputs(provider);
+    if (canUseVision) {
+      console.log(pc.cyan("Model supports vision. Generating mockup for refinement..."));
+      
+      // Generate intermediate palette/manifest for visual critique
+      let intermediatePalette = generatePalette({
+        ...seed,
+        mode: opts.paletteMode !== "balanced" ? opts.paletteMode : seed.mode || "balanced"
+      });
+      intermediatePalette = rebalancePalette(intermediatePalette);
+      const intermediateManifest = mapPaletteToManifest(opts.name ?? normalizeGeneratedName(seed.name), intermediatePalette);
+      
+      const mockUrl = generateMockBrowserSvg(intermediateManifest);
+      
+      const refinementMessages: ChatMessage[] = [
+        ...messages,
+        { role: "assistant", content: stream.rawManifest },
+        { 
+          role: "user", 
+          content: [
+            { type: "text", text: "Here is a visual mockup of the theme you just generated. Please critique the aesthetic appeal. If the colours are dull, or if the dark mode is ugly/muddy, fix it. Output a new, finalized SeedPalette JSON." },
+            { type: "image_url", image_url: { url: mockUrl } }
+          ]
+        }
+      ];
+      
+      const refinementStream = await streamThemeManifest(provider, refinementMessages, opts.thinking, true);
+      try {
+        const refinedSeed = JSON.parse(refinementStream.rawManifest);
+        if (refinedSeed.base_color && refinedSeed.accent_color && typeof refinedSeed.primary_hue === "number") {
+          seed = refinedSeed;
+          console.log(pc.green("Theme refined via vision feedback loop."));
+        }
+      } catch (e) {
+        console.log(pc.yellow(`Vision refinement failed to parse. Using original seed. Error: ${e instanceof Error ? e.message : String(e)}`));
+      }
     }
 
     // Use our local palette generator
