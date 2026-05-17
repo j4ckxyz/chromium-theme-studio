@@ -230,6 +230,9 @@ function parseCli(raw: string[]): CliOptions {
     "tint-frame": "tint_frame",
     "tint-frame-inactive": "tint_frame_inactive",
   };
+
+  const promptParts: string[] = [];
+
   for (let i = 0; i < raw.length; i++) {
     const arg = raw[i];
     if (arg === "-h" || arg === "--help") { printHelp(0); }
@@ -238,6 +241,7 @@ function parseCli(raw: string[]): CliOptions {
     if (arg === "--screenshots" || arg === "-s") { opts.screenshots = true; continue; }
     if (arg === "--preview-sheet" || arg === "-p") { opts.previewSheet = true; continue; }
     if (arg === "--firefox" || arg === "-F") { opts.firefox = true; continue; }
+    if (arg === "--iterate") { opts.iterate = true; continue; }
 
     if (arg === "--variations" || arg === "-v") {
       const n = raw[++i];
@@ -314,7 +318,6 @@ function parseCli(raw: string[]): CliOptions {
     }
 
     if (arg === "--debug-palette") { opts.debugPalette = true; continue; }
-    if (arg === "--iterate") { opts.iterate = true; continue; }
 
     // --color.<key>=<value> for explicit colors
     if (arg.startsWith("--color.")) {
@@ -339,12 +342,12 @@ function parseCli(raw: string[]): CliOptions {
       continue;
     }
 
-    if (arg.startsWith("--")) throw new Error(`Unknown flag: ${arg}`);
-    if (arg.startsWith("-") && !arg.startsWith("-c.")) throw new Error(`Unknown flag: ${arg}`);
+    if (arg.startsWith("-")) throw new Error(`Unknown flag: ${arg}`);
 
-    opts.prompt = raw.slice(i).join(" ");
-    break;
+    promptParts.push(arg);
   }
+
+  opts.prompt = promptParts.join(" ");
 
   if (opts.variations < 1 || opts.variations > MAX_VARIATIONS) {
     throw new Error(`--variations must be 1-${MAX_VARIATIONS}`);
