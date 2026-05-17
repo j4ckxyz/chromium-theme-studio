@@ -482,14 +482,48 @@ function printColorSummary(manifest: ThemeManifest): void {
 }
 
 // ─── Manifest generation ──────────────────────────────────────────────────
-function buildUserMessage(input: string, failedPairs: string[], mode: "light" | "dark" | null, refs: unknown[]): string {
-  const parts = [FEW_SHOT_EXAMPLES, `Theme request: ${input}`];
-  if (mode === "light") parts.push("Mode preference: User explicitly requested a light theme.");
-  else if (mode === "dark") parts.push("Mode preference: User explicitly requested a dark theme.");
-  else parts.push("Mode preference: No explicit light/dark mode requested.");
-  if (refs.length > 0) parts.push(`Reference images attached (${refs.length}). Use them for colour inspiration.`);
-  if (failedPairs.length > 0) parts.push(`${RETRY_NOTE_PREFIX} ${failedPairs.join(", ")}.`);
-  return parts.join("\n\n");
+type ChatContentPart = 
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: string } };
+
+function buildUserMessage(input: string, failedPairs: string[], mode: "light" | "dark" | null, imageUrls: string[]): ChatContentPart[] {
+  const textParts: string[] = [FEW_SHOT_EXAMPLES, `Theme request: ${input}`];
+  if (mode === "light") textParts.push("Mode preference: User explicitly requested a light theme.");
+  else if (mode === "dark") textParts.push("Mode preference: User explicitly requested a dark theme.");
+  else textParts.push("Mode preference: No explicit light/dark mode requested.");
+  
+  if (imageUrls.length > 0) {
+    textParts.push(`I have attached ${imageUrls.length} reference image(s). Please use them for aesthetic and colour inspiration.`);
+  }
+  
+  if (failedPairs.length > 0) textParts.push(`${RETRY_NOTE_PREFIX} ${failedPairs.join(", ")}.`);
+
+  const content: ChatContentPart[] = [
+    { type: "text", text: textParts.join("\n\n") }
+  ];
+
+  for (const url of imageUrls) {
+    content.push({ type: "image_url", image_url: { url } });
+  }
+
+  return content;
+}
+
+async function resolveImageToDataUrl(imagePath: string): Promise<string> {
+  if (imagePath.startsWith("http://") || imagePath.startsWith("https://")) {
+    const resp = await fetch(imagePath);
+    if (!resp.ok) throw new Error(`Failed to fetch image: ${resp.statusText}`);
+    const bytes = await resp.arrayBuffer();
+    const mime = resp.headers.get("content-type") || "image/png";
+    const base64 = Buffer.from(bytes).toString("base64");
+    return `data:${mime};base64,${base64}`;
+  } else {
+    const bytes = await Bun.file(imagePath).arrayBuffer();
+    const ext = path.extname(imagePath).toLowerCase();
+    const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png";
+    const base64 = Buffer.from(bytes).toString("base64");
+    return `data:${mime};base64,${base64}`;
+  }
 }
 
 function generateMockBrowserSvg(manifest: ThemeManifest): string {
@@ -554,12 +588,25 @@ async function generateTheme(
     
     let imageNote = "";
     if (imageColors.length > 0) {
-      imageNote = `\n\nImage Inspiration Colours (use these as hints for base or accents):\n${imageColors.map(c => rgbToHex(c)).join(", ")}`;
+      imageNote = `\n\nImage Inspiration Colours (fallback hints): ${imageColors.map(c => rgbToHex(c)).join(", ")}`;
+    }
+
+    const imageUrls: string[] = [];
+    if (opts.images.length > 0) {
+      console.log(pc.cyan(`Preparing ${opts.images.length} image(s) for vision input...`));
+      for (const img of opts.images) {
+        try {
+          const dataUrl = await resolveImageToDataUrl(img);
+          imageUrls.push(dataUrl);
+        } catch (e) {
+          console.log(pc.yellow(`Warning: Could not resolve image ${img}: ${e instanceof Error ? e.message : String(e)}`));
+        }
+      }
     }
 
     const messages: ChatMessage[] = [
       { role: "system", content: buildSystemPrompt(referenceContent) },
-      { role: "user", content: buildUserMessage(prompt + variationNote + imageNote, [], mode, []) },
+      { role: "user", content: buildUserMessage(prompt + variationNote + imageNote, [], mode, imageUrls) },
     ];
 
     const stream = await streamThemeManifest(provider, messages, opts.thinking, opts.images.length > 0);
