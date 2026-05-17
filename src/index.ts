@@ -580,7 +580,10 @@ async function generateTheme(
         const contrastSummary = checks.map(c => `${c.pass ? "✅" : "❌"} ${c.label}: ${c.ratio.toFixed(1)}:1 (${c.score})`).join("\n");
         const materialScore = computeMaterialScore(palette);
         
-        const refinementPrompt = `Here is a visual mockup of the theme (Iteration ${iter}).
+        const refinementPrompt = `
+Visual Mockup (Iteration ${iter}):
+[See attached image]
+
 Contrast Results:
 ${contrastSummary}
 
@@ -590,19 +593,22 @@ Material Consistency Scores:
 - Contrast Compliance: ${materialScore.contrast.toFixed(2)}
 - TOTAL: ${materialScore.total.toFixed(2)}
 
-Please critique this design. Focus on:
-1. Aesthetic Appeal: Is it fun, enjoyable, and high-end?
-2. Cohesion: Is the base color beautifully tinted?
-3. Dark Mode Quality: Is it deep and rich, not muddy?
-4. Fix any contrast failures.
+DIRECTIONS:
+1. CRITIQUE this design aggressively. Look for muddiness, dull greys, or lack of "pop."
+2. Is it truly high-end and enjoyable to use? If not, fix it.
+3. Fix any contrast failures by shifting the Seed colours.
+4. Output your design thinking followed by the REFINED SeedPalette JSON in a code block.
 
-If you are 100% satisfied and believe this is a final "masterpiece" version, output "FINAL" followed by the SeedPalette JSON in a code block.
-If it needs improvement, output your critique and a REFINED SeedPalette JSON in a code block.`;
+FINALIZATION RULE:
+- If and ONLY IF you are 100% satisfied that this theme is a "masterpiece" (perfectly cohesive, rich, and fun), output the token [DESIGN_FINALIZED] followed by the final JSON.
+- DO NOT use the [DESIGN_FINALIZED] token if you think ANY improvement is still possible. Be picky.`;
+
+        console.log(pc.cyan(`\n--- Design Refinement Loop: Iteration ${iter}/${maxIter} ---`));
 
         history.push({ 
           role: "user", 
           content: [
-            { type: "text", text: refinementPrompt },
+            { type: "text", text: refinementPrompt.trim() },
             { type: "image_url", image_url: { url: mockUrl } }
           ]
         });
@@ -622,11 +628,11 @@ If it needs improvement, output your critique and a REFINED SeedPalette JSON in 
           console.log(pc.yellow(`Vision refinement failed to parse JSON. Error: ${e instanceof Error ? e.message : String(e)}`));
         }
 
-        if (refinementStream.rawManifest.includes("FINAL") || !opts.iterate) {
-          console.log(pc.green(`Design finalized at iteration ${iter}.`));
+        if (refinementStream.rawManifest.includes("[DESIGN_FINALIZED]") || !opts.iterate) {
+          console.log(pc.green(`\nDesign finalized at iteration ${iter}.`));
           break;
         } else {
-          console.log(pc.cyan(`Iteration ${iter} complete. Refinement continues...`));
+          console.log(pc.cyan(`\nIteration ${iter} complete. Refinement continues...`));
         }
         
         if (iter === maxIter) {
