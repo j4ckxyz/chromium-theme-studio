@@ -1,3 +1,4 @@
+import pc from "picocolors";
 import type { ResolvedProvider } from "./config.js";
 import type { ChatMessage, StreamThemeResult } from "./manifest.js";
 
@@ -92,6 +93,7 @@ export async function streamThemeManifest(
       const printChunk = (chunk: string) => {
         if (!chunk) return;
         if (timeToThinkingMs === null) timeToThinkingMs = performance.now() - startedAt;
+        process.stdout.write(pc.dim(chunk));
       };
 
       if (Array.isArray(reasoningDetails)) {
