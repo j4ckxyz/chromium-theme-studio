@@ -193,6 +193,7 @@ type CliOptions = {
   explicitColors: Record<string, string>;
   paletteMode: PaletteMode;
   debugPalette: boolean;
+  iterate: boolean;
 };
 
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
@@ -215,6 +216,7 @@ function parseCli(raw: string[]): CliOptions {
     explicitColors: {},
     paletteMode: "balanced",
     debugPalette: false,
+    iterate: false,
   };
   const COLOR_ALIASES: Record<string, string> = {
     "frame-inactive": "frame_inactive",
@@ -312,6 +314,7 @@ function parseCli(raw: string[]): CliOptions {
     }
 
     if (arg === "--debug-palette") { opts.debugPalette = true; continue; }
+    if (arg === "--iterate") { opts.iterate = true; continue; }
 
     // --color.<key>=<value> for explicit colors
     if (arg.startsWith("--color.")) {
@@ -378,6 +381,7 @@ function printHelp(exit = 1): never {
   p(`  ${pc.cyan("-f, --from <path>")}        Re-process existing theme folder/manifest`);
   p(`  ${pc.cyan("--palette-mode <m>")}      balanced|vibrant|muted|monochrome (default balanced)`);
   p(`  ${pc.cyan("--debug-palette")}         Show internal palette structure and scores`);
+  p(`  ${pc.cyan("--iterate")}               Loop design refinement until model is satisfied (max 15)`);
   p(`  ${pc.cyan("--thinking[=<level>]")}     Enable reasoning (xhigh|high|medium|low|minimal|none|off)
 `);
   p(`${pc.bold("COLOR options (direct mode — no LLM call):")}`);
@@ -515,7 +519,7 @@ function generateMockBrowserSvg(manifest: ThemeManifest): string {
 async function generateTheme(
   provider: ResolvedProvider,
   prompt: string,
-  opts: Pick<CliOptions, "thinking" | "name" | "variations" | "images" | "webStore" | "firefox" | "screenshots" | "previewSheet" | "from" | "paletteMode" | "debugPalette">,
+  opts: Pick<CliOptions, "thinking" | "name" | "variations" | "images" | "webStore" | "firefox" | "screenshots" | "previewSheet" | "from" | "paletteMode" | "debugPalette" | "iterate">,
   variationIndex: number,
   variationCount: number,
   mode: "light" | "dark" | null,
@@ -551,56 +555,87 @@ async function generateTheme(
       throw new Error(`Failed to parse or validate generated SeedPalette. ${e.message}\nRaw:\n${stream.rawManifest.slice(0, 500)}`);
     }
 
-    // --- Vision Feedback Loop ---
+    // --- Vision Feedback / Refinement Loop ---
     const canUseVision = await modelSupportsImageInputs(provider);
     if (canUseVision) {
-      console.log(pc.cyan("Model supports vision. Generating mockup for refinement..."));
+      console.log(pc.cyan("Model supports vision. Entering design refinement..."));
       
-      // Generate intermediate palette/manifest for visual critique
-      let intermediatePalette = generatePalette({
-        ...seed,
-        mode: opts.paletteMode !== "balanced" ? opts.paletteMode : seed.mode || "balanced"
-      });
-      intermediatePalette = rebalancePalette(intermediatePalette);
-      const intermediateManifest = mapPaletteToManifest(opts.name ?? normalizeGeneratedName(seed.name), intermediatePalette);
-      
-      const svg = generateMockBrowserSvg(intermediateManifest);
-      const resvg = new Resvg(svg, { background: "white", fitTo: { mode: "width", value: 800 } });
-      const pngData = resvg.render();
-      const pngBuffer = pngData.asPng();
-      const mockUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
-      
-      const refinementMessages: ChatMessage[] = [
-        ...messages,
-        { role: "assistant", content: stream.rawManifest },
-        { 
+      const maxIter = opts.iterate ? 15 : 1;
+      const history: ChatMessage[] = [...messages, { role: "assistant", content: stream.rawManifest }];
+
+      for (let iter = 1; iter <= maxIter; iter++) {
+        // Generate intermediate palette/manifest for visual critique
+        let palette = generatePalette({
+          ...seed,
+          mode: opts.paletteMode !== "balanced" ? opts.paletteMode : seed.mode || "balanced"
+        });
+        palette = rebalancePalette(palette);
+        const manifest = mapPaletteToManifest(opts.name ?? normalizeGeneratedName(seed.name), palette);
+        const checks = runContrastChecks(manifest);
+        const svg = generateMockBrowserSvg(manifest);
+        const resvg = new Resvg(svg, { background: "white", fitTo: { mode: "width", value: 800 } });
+        const pngBuffer = resvg.render().asPng();
+        const mockUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+
+        const contrastSummary = checks.map(c => `${c.pass ? "✅" : "❌"} ${c.label}: ${c.ratio.toFixed(1)}:1 (${c.score})`).join("\n");
+        const materialScore = computeMaterialScore(palette);
+        
+        const refinementPrompt = `Here is a visual mockup of the theme (Iteration ${iter}).
+Contrast Results:
+${contrastSummary}
+
+Material Consistency Scores:
+- Diversity: ${materialScore.diversity.toFixed(2)}
+- Luminance Range: ${materialScore.luminanceRange.toFixed(2)}
+- Contrast Compliance: ${materialScore.contrast.toFixed(2)}
+- TOTAL: ${materialScore.total.toFixed(2)}
+
+Please critique this design. Focus on:
+1. Aesthetic Appeal: Is it fun, enjoyable, and high-end?
+2. Cohesion: Is the base color beautifully tinted?
+3. Dark Mode Quality: Is it deep and rich, not muddy?
+4. Fix any contrast failures.
+
+If you are 100% satisfied and believe this is a final "masterpiece" version, output "FINAL" followed by the SeedPalette JSON in a code block.
+If it needs improvement, output your critique and a REFINED SeedPalette JSON in a code block.`;
+
+        history.push({ 
           role: "user", 
           content: [
-            { type: "text", text: "Here is a visual mockup of the theme you just generated. Please critique the aesthetic appeal. If the colours are dull, or if the dark mode is ugly/muddy, fix it. Output your critique followed by the new, finalized SeedPalette JSON wrapped in ```json blocks." },
+            { type: "text", text: refinementPrompt },
             { type: "image_url", image_url: { url: mockUrl } }
           ]
-        }
-      ];
-      
-      const refinementStream = await streamThemeManifest(provider, refinementMessages, opts.thinking, true);
-      
-      // The reasoning tokens and content chunks are already being printed by streamThemeManifest
-      process.stdout.write("\n"); // Ensure newline after streaming refinement
+        });
 
-      try {
-        const jsonMatch = refinementStream.rawManifest.match(/```json\n([\s\S]*?)\n```/) || refinementStream.rawManifest.match(/{[\s\S]*?}/);
-        const jsonStr = jsonMatch ? jsonMatch[1] || jsonMatch[0] : refinementStream.rawManifest;
-        const refinedSeed = JSON.parse(jsonStr);
-        if (refinedSeed.base_color && refinedSeed.accent_color && typeof refinedSeed.primary_hue === "number") {
-          seed = refinedSeed;
-          console.log(pc.green("Theme refined via vision feedback loop."));
+        const refinementStream = await streamThemeManifest(provider, history, opts.thinking, true);
+        process.stdout.write("\n");
+        history.push({ role: "assistant", content: refinementStream.rawManifest });
+
+        try {
+          const jsonMatch = refinementStream.rawManifest.match(/```json\n([\s\S]*?)\n```/) || refinementStream.rawManifest.match(/{[\s\S]*?}/);
+          const jsonStr = jsonMatch ? jsonMatch[1] || jsonMatch[0] : refinementStream.rawManifest;
+          const newSeed = JSON.parse(jsonStr);
+          if (newSeed.base_color && newSeed.accent_color && typeof newSeed.primary_hue === "number") {
+            seed = newSeed;
+          }
+        } catch (e) {
+          console.log(pc.yellow(`Vision refinement failed to parse JSON. Error: ${e instanceof Error ? e.message : String(e)}`));
         }
-      } catch (e) {
-        console.log(pc.yellow(`Vision refinement failed to parse. Using original seed. Error: ${e instanceof Error ? e.message : String(e)}`));
+
+        if (refinementStream.rawManifest.includes("FINAL") || !opts.iterate) {
+          console.log(pc.green(`Design finalized at iteration ${iter}.`));
+          break;
+        } else {
+          console.log(pc.cyan(`Iteration ${iter} complete. Refinement continues...`));
+        }
+        
+        if (iter === maxIter) {
+          console.log(pc.yellow("Reached maximum design iterations. Finalizing current version."));
+        }
       }
     }
 
-    // Use our local palette generator
+    // Use our local palette generator for the final version
     let palette = generatePalette({
       ...seed,
       mode: opts.paletteMode !== "balanced" ? opts.paletteMode : seed.mode || "balanced"
@@ -608,7 +643,7 @@ async function generateTheme(
     
     if (opts.debugPalette) {
       console.log(pc.magenta("\n--- Debug Palette ---"));
-      console.log("Seed:", JSON.stringify(seed, null, 2));
+      console.log("Final Seed:", JSON.stringify(seed, null, 2));
       const score = computeMaterialScore(palette);
       console.log("Material Score:", JSON.stringify(score, null, 2));
     }
