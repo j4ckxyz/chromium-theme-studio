@@ -16,7 +16,13 @@ import {
   relativePathFromCwd, escapeHtml,
   type ThemeManifest, type ContrastCheck, type StreamThemeResult,
   type ImageReferenceOutcome, type ScreenshotArtifacts,
+  type PaletteSeed,
 } from "./manifest.js";
+import {
+  generatePalette, mapPaletteToManifest, rebalancePalette, computeMaterialScore,
+  type PaletteMode
+} from "./palette.js";
+import { extractSemanticColors } from "./image-extractor.js";
 import { streamThemeManifest, fetchGenerationMetadata, modelSupportsImageInputs } from "./provider.js";
 import {
   EXAMPLES, findExampleBySlug, findExamplesByTag,
@@ -26,14 +32,6 @@ import {
 import { addHistoryEntry, getHistoryEntries, getHistoryStats } from "./history.js";
 import {
   buildManifestFromColors,
-  validateManifest,
-  rgbToHex,
-  swatch,
-  slugify,
-  type ThemeManifest,
-  type ContrastCheck,
-  type StreamThemeResult,
-  type ImageReferenceOutcome,
 } from "./manifest.js";
 
 // ─── ANSI Rainbow helpers ───────────────────────────────────────────────────
@@ -78,132 +76,44 @@ async function fileToDataUrl(filePath: string, mimeType: string): Promise<string
 
 // ─── Prompts system ────────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are an expert UI colour designer specialising in browser chrome and interface themes.
-Given a description, mood, or palette, you output ONLY a valid Chromium theme manifest.json.
+Given a description, mood, or palette, you output ONLY a valid SeedPalette JSON.
 No markdown, no explanation, no backticks — raw JSON only.
 
-You must apply professional colour theory principles:
-
-COLOUR HARMONY:
-- Choose colours from a coherent palette: analogous, complementary, triadic, or monochromatic
-- Active tab should feel clearly distinct from inactive tabs, but remain part of the same family
-- The NTP (new tab page) background should feel like a natural extension of the frame
-
-CONTRAST & ACCESSIBILITY:
-- Prioritise the requested palette, emotional tone, and vibrancy over strict accessibility targets
-- Aim for basic legibility for key text, but allow lower-contrast or slightly clashing combinations when needed to preserve the core vibe
-- Do not neutralise, desaturate, or mute a vibrant prompt just to chase strict WCAG thresholds
-
-PERCEPTUAL LIGHTNESS:
-- Use HSL thinking: vary lightness by at least 25–40 points between background and text layers
-- Avoid pure black (#000000) and pure white (#FFFFFF) — use near-blacks and near-whites instead
-  e.g. [15, 15, 20] instead of [0, 0, 0], and [245, 245, 248] instead of [255, 255, 255]
-- frame and frame_inactive should differ slightly in lightness (5–15 points)
-
-COLOUR TEMPERATURE:
-- Keep the overall colour temperature consistent
-- ntp_link should harmonise with the frame colour, not clash with it
-
-TINTS:
-- Use tints.buttons to subtly shift button icon colours to match the frame hue
-  HSL format: [hue 0–1, saturation 0–1, lightness 0–1], use -1 for "no change"
-- Avoid fully neutral tints unless the theme is intentionally monochrome
+You must apply professional colour theory principles to select the core SEED colours.
 
 OUTPUT STRUCTURE — follow exactly:
-
 {
-  "manifest_version": 3,
-  "name": "<evocative, specific theme name — not generic>",
-  "version": "1.0",
-  "theme": {
-    "colors": {
-      "frame":                [R, G, B],
-      "frame_inactive":       [R, G, B],
-      "toolbar":              [R, G, B],
-      "tab_text":             [R, G, B],
-      "tab_background_text":  [R, G, B],
-      "bookmark_text":        [R, G, B],
-      "ntp_background":       [R, G, B],
-      "ntp_text":             [R, G, B],
-      "ntp_link":             [R, G, B],
-      "button_background":    [R, G, B, A]
-    },
-    "tints": {
-      "buttons":        [H, S, L],
-      "frame":          [H, S, L],
-      "frame_inactive": [H, S, L]
-    },
-    "properties": {
-      "ntp_background_alignment": "bottom",
-      "ntp_logo_alternate": 1
-    }
-  }
+  "name": "<evocative theme name>",
+  "primary_hue": <0-360>,
+  "base_color": [R, G, B],
+  "accent_color": [R, G, B],
+  "mode": "balanced" | "vibrant" | "muted" | "monochrome"
 }
 
 RULES:
-- All RGB values: integers 0–255
-- button_background alpha: float 0.0–1.0
-- Tint values: floats -1.0 to 1.0
-- No images keys
-- Raw JSON only — nothing else in your response`;
+- base_color: The dominant surface colour (usually for the frame).
+- accent_color: The primary highlight colour (usually for links or active elements).
+- primary_hue: The main hue angle that defines the theme's character.
+- mode: Aesthetic direction.
+- All RGB values: integers 0–255.
+- Raw JSON only — nothing else in your response.`;
 
 const FEW_SHOT_EXAMPLES = `Example 1 — Dark theme ("Obsidian Dusk"):
 {
-  "manifest_version": 3,
   "name": "Obsidian Dusk",
-  "version": "1.0",
-  "theme": {
-    "colors": {
-      "frame":               [18, 18, 28],
-      "frame_inactive":      [25, 25, 38],
-      "toolbar":             [28, 28, 45],
-      "tab_text":            [230, 225, 255],
-      "tab_background_text": [130, 125, 160],
-      "bookmark_text":       [210, 205, 240],
-      "ntp_background":      [12, 12, 20],
-      "ntp_text":            [220, 215, 248],
-      "ntp_link":            [140, 120, 240],
-      "button_background":   [255, 255, 255, 0.0]
-    },
-    "tints": {
-      "buttons":        [0.72, 0.3, 0.85],
-      "frame":          [-1, -1, -1],
-      "frame_inactive": [-1, -1, 0.45]
-    },
-    "properties": {
-      "ntp_background_alignment": "bottom",
-      "ntp_logo_alternate": 1
-    }
-  }
+  "primary_hue": 240,
+  "base_color": [18, 18, 28],
+  "accent_color": [140, 120, 240],
+  "mode": "balanced"
 }
 
 Example 2 — Light theme ("Morning Linen"):
 {
-  "manifest_version": 3,
   "name": "Morning Linen",
-  "version": "1.0",
-  "theme": {
-    "colors": {
-      "frame":               [235, 228, 215],
-      "frame_inactive":      [225, 218, 205],
-      "toolbar":             [245, 240, 230],
-      "tab_text":            [40, 32, 20],
-      "tab_background_text": [120, 110, 90],
-      "bookmark_text":       [55, 45, 30],
-      "ntp_background":      [250, 246, 238],
-      "ntp_text":            [35, 28, 18],
-      "ntp_link":            [140, 90, 30],
-      "button_background":   [0, 0, 0, 0.0]
-    },
-    "tints": {
-      "buttons":        [0.1, 0.2, 0.35],
-      "frame":          [-1, -1, -1],
-      "frame_inactive": [-1, -1, 0.55]
-    },
-    "properties": {
-      "ntp_background_alignment": "bottom",
-      "ntp_logo_alternate": 1
-    }
-  }
+  "primary_hue": 40,
+  "base_color": [235, 228, 215],
+  "accent_color": [140, 90, 30],
+  "mode": "balanced"
 }`;
 
 const FIREFOX_SYSTEM_PROMPT = `You are an expert UI colour designer specialising in browser themes.
@@ -261,6 +171,8 @@ type CliOptions = {
   providerModel: string | null;
   profile: string | null;
   explicitColors: Record<string, string>;
+  paletteMode: PaletteMode;
+  debugPalette: boolean;
 };
 
 // ─── CLI parsing ─────────────────────────────────────────────────────────────
@@ -281,6 +193,8 @@ function parseCli(raw: string[]): CliOptions {
     providerModel: null,
     profile: null,
     explicitColors: {},
+    paletteMode: "balanced",
+    debugPalette: false,
   };
   const COLOR_ALIASES: Record<string, string> = {
     "frame-inactive": "frame_inactive",
@@ -364,6 +278,21 @@ function parseCli(raw: string[]): CliOptions {
     }
     if (arg.startsWith("--profile=")) { opts.profile = arg.slice(10); continue; }
 
+    if (arg === "--palette-mode") {
+      const m = raw[++i] as PaletteMode;
+      if (!["balanced", "vibrant", "muted", "monochrome"].includes(m)) throw new Error("Invalid palette mode");
+      opts.paletteMode = m;
+      continue;
+    }
+    if (arg.startsWith("--palette-mode=")) {
+      const m = arg.slice(15) as PaletteMode;
+      if (!["balanced", "vibrant", "muted", "monochrome"].includes(m)) throw new Error("Invalid palette mode");
+      opts.paletteMode = m;
+      continue;
+    }
+
+    if (arg === "--debug-palette") { opts.debugPalette = true; continue; }
+
     // --color.<key>=<value> for explicit colors
     if (arg.startsWith("--color.")) {
       const rest = arg.slice(8);
@@ -427,6 +356,8 @@ function printHelp(exit = 1): never {
   p(`  ${pc.cyan("-F, --firefox")}            Also generate Firefox manifest`);
   p(`  ${pc.cyan("-i, --image <path/url>")}   Reference image(s) for palette inspiration`);
   p(`  ${pc.cyan("-f, --from <path>")}        Re-process existing theme folder/manifest`);
+  p(`  ${pc.cyan("--palette-mode <m>")}      balanced|vibrant|muted|monochrome (default balanced)`);
+  p(`  ${pc.cyan("--debug-palette")}         Show internal palette structure and scores`);
   p(`  ${pc.cyan("--thinking[=<level>]")}     Enable reasoning (xhigh|high|medium|low|minimal|none|off)
 `);
   p(`${pc.bold("COLOR options (direct mode — no LLM call):")}`);
@@ -522,40 +453,60 @@ function buildUserMessage(input: string, failedPairs: string[], mode: "light" | 
 async function generateTheme(
   provider: ResolvedProvider,
   prompt: string,
-  opts: Pick<CliOptions, "thinking" | "name" | "variations" | "images" | "webStore" | "firefox" | "screenshots" | "previewSheet" | "from">,
+  opts: Pick<CliOptions, "thinking" | "name" | "variations" | "images" | "webStore" | "firefox" | "screenshots" | "previewSheet" | "from" | "paletteMode" | "debugPalette">,
   variationIndex: number,
   variationCount: number,
   mode: "light" | "dark" | null,
   imageOutcome: ImageReferenceOutcome,
+  imageColors: Rgb[] = [],
 ): Promise<{ manifest: ThemeManifest; checks: ContrastCheck[]; stream: StreamThemeResult }> {
-  let retryFailedPairs: string[] = [];
   let bestResult: { manifest: ThemeManifest; checks: ContrastCheck[]; stream: StreamThemeResult } | undefined;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) console.log(pc.yellow(`Retrying (${attempt}/${MAX_RETRIES})...`));
 
     const variationNote = variationCount > 1 ? `\n\nVariation instruction: Candidate ${variationIndex} of ${variationCount}. Keep the same overall mood, but make this palette clearly distinct.` : "";
+    
+    let imageNote = "";
+    if (imageColors.length > 0) {
+      imageNote = `\n\nImage Inspiration Colours (use these as hints for base or accents):\n${imageColors.map(c => rgbToHex(c)).join(", ")}`;
+    }
 
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: buildUserMessage(prompt + variationNote, retryFailedPairs, mode, []) },
+      { role: "user", content: buildUserMessage(prompt + variationNote + imageNote, [], mode, []) },
     ];
 
     const stream = await streamThemeManifest(provider, messages, opts.thinking, opts.images.length > 0);
 
-    let parsed: unknown;
+    let seed: PaletteSeed;
     try {
-      parsed = JSON.parse(stream.rawManifest);
-    } catch {
-      throw new Error(`Failed to parse generated JSON. Raw:\n${stream.rawManifest.slice(0, 500)}`);
+      seed = JSON.parse(stream.rawManifest);
+      if (!seed.base_color || !seed.accent_color || typeof seed.primary_hue !== "number") {
+        throw new Error("Missing required SeedPalette fields");
+      }
+    } catch (e) {
+      throw new Error(`Failed to parse or validate generated SeedPalette. ${e.message}\nRaw:\n${stream.rawManifest.slice(0, 500)}`);
     }
 
-    const errors = validateManifest(parsed);
-    if (errors.length > 0) throw new Error(`Validation failed: ${errors.join("; ")}`);
+    // Use our local palette generator
+    let palette = generatePalette({
+      ...seed,
+      mode: opts.paletteMode !== "balanced" ? opts.paletteMode : seed.mode || "balanced"
+    });
+    
+    if (opts.debugPalette) {
+      console.log(pc.magenta("\n--- Debug Palette ---"));
+      console.log("Seed:", JSON.stringify(seed, null, 2));
+      const score = computeMaterialScore(palette);
+      console.log("Material Score:", JSON.stringify(score, null, 2));
+    }
 
-    const manifest = parsed as ThemeManifest;
-    const baseName = opts.name ?? normalizeGeneratedName(manifest.name);
-    manifest.name = variationCount > 1 ? `${baseName} ${variationIndex}` : baseName;
+    // Auto-rebalance for accessibility
+    palette = rebalancePalette(palette);
+    
+    const manifest = mapPaletteToManifest(opts.name ?? normalizeGeneratedName(seed.name), palette);
+    manifest.name = variationCount > 1 ? `${manifest.name} ${variationIndex}` : manifest.name;
 
     const checks = await runContrastChecks(manifest);
 
@@ -564,8 +515,7 @@ async function generateTheme(
     }
 
     const failed = checks.filter((c) => !c.pass);
-    if (failed.length === 0 || failed.length <= 2 || attempt === MAX_RETRIES) break;
-    retryFailedPairs = failed.map((f) => f.label);
+    if (failed.length === 0 || attempt === MAX_RETRIES) break;
   }
 
   if (!bestResult) throw new Error("No valid theme manifest was produced.");
@@ -697,6 +647,21 @@ async function cmdGenerate(rawArgs: string[]): Promise<void> {
   const imageOutcome: ImageReferenceOutcome = { requestedCount: opts.images.length, status: opts.images.length > 0 ? "prepared" : "not requested", detail: "" };
 
   const results: import("./manifest.js").ThemeProcessingResult[] = [];
+  
+  let imageColors: Rgb[] = [];
+  if (opts.images.length > 0) {
+    console.log(pc.cyan(`Extracting semantic colours from ${opts.images.length} image(s)...`));
+    for (const img of opts.images) {
+      try {
+        const pal = await extractSemanticColors(img);
+        imageColors.push(...pal.shadows, ...pal.midtones, ...pal.highlights, ...pal.accents);
+      } catch (e) {
+        console.log(pc.yellow(`Failed to extract colours from ${img}: ${e}`));
+      }
+    }
+    // Limit to 10 representative colors
+    imageColors = imageColors.slice(0, 10);
+  }
 
   if (opts.from) {
     const resolved = path.resolve(process.cwd(), opts.from);
@@ -743,7 +708,7 @@ async function cmdGenerate(rawArgs: string[]): Promise<void> {
   } else {
     for (let vi = 1; vi <= opts.variations; vi++) {
       if (opts.variations > 1) console.log(pc.cyan(`\nGenerating variation ${vi}/${opts.variations}...`));
-      const { manifest, checks, stream } = await generateTheme(provider, opts.prompt, opts, vi, opts.variations, mode, imageOutcome);
+      const { manifest, checks, stream } = await generateTheme(provider, opts.prompt, opts, vi, opts.variations, mode, imageOutcome, imageColors);
       const result = await writeThemeArtifacts(provider, manifest, checks, stream, false, "", "", opts);
       results.push(result);
     }
