@@ -67,7 +67,7 @@ export function mapPaletteToManifest(name: string, palette: InternalPalette): Th
         frame_inactive: palette.base_mid,
         toolbar: palette.surface_tint_1,
         tab_text: palette.base_light,
-        tab_background_text: isDark ? palette.base_mid : palette.base_dark, // Simplified for now
+        tab_background_text: palette.base_mid,
         bookmark_text: palette.base_light,
         ntp_background: palette.base_dark,
         ntp_text: palette.base_light,
@@ -123,6 +123,9 @@ export function rebalancePalette(palette: InternalPalette): InternalPalette {
   
   // Also ensure base_light has contrast on base_dark (ntp_text on ntp_background)
   p.base_light = ensureContrast(p.base_light, p.base_dark, 4.5);
+  
+  // Ensure inactive tab text has contrast on frame (base_dark)
+  p.base_mid = ensureContrast(p.base_mid, p.base_dark, 2.0);
   
   return p;
 }
