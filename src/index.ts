@@ -618,7 +618,7 @@ DIRECTIONS:
 3. FIX CONTRAST: If you see red "❌" above, you MUST shift your Seed colours (base or accent) until the math works.
 4. BEST PRACTICES: Follow the REFERENCE manual strictly. Use rich, tinted neutrals.
 5. If the current design is a "Masterpiece", output [DESIGN_FINALIZED] followed by the JSON.
-6. Otherwise, output your critique and the REFINED SeedPalette JSON in a code block.`;
+6. Otherwise, output your critique and the REFINED SeedPalette JSON in a code block.
 
 FINALIZATION RULE:
 - If and ONLY IF you are 100% satisfied that this theme is a "masterpiece" (perfectly cohesive, rich, and fun), output the token [DESIGN_FINALIZED] followed by the final JSON.
