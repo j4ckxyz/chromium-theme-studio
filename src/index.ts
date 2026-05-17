@@ -75,8 +75,18 @@ async function fileToDataUrl(filePath: string, mimeType: string): Promise<string
   return `data:${mimeType};base64,${base64}`;
 }
 
+async function loadReferenceContent(): Promise<string | null> {
+  try {
+    const filePath = path.resolve(process.cwd(), "REFERENCE.md");
+    const content = await Bun.file(filePath).text();
+    return content;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Prompts system ────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are an expert UI colour designer specialising in browser chrome and interface themes.
+const SYSTEM_PROMPT_BASE = `You are an expert UI colour designer specialising in browser chrome and interface themes.
 Given a description, mood, or palette, you output ONLY a valid SeedPalette JSON.
 No markdown, no explanation, no backticks — raw JSON only.
 
@@ -108,6 +118,11 @@ RULES:
 - mode: Aesthetic direction.
 - All RGB values: integers 0–255.
 - Raw JSON only — nothing else in your response.`;
+
+function buildSystemPrompt(referenceContent: string | null): string {
+  if (!referenceContent) return SYSTEM_PROMPT_BASE;
+  return `${SYSTEM_PROMPT_BASE}\n\n### REFERENCE BEST PRACTICES:\nFollow these industry standards and technical constraints strictly:\n\n${referenceContent}`;
+}
 
 const FEW_SHOT_EXAMPLES = `Example 1 — Dark theme ("Midnight Ink"):
 {
@@ -528,6 +543,7 @@ async function generateTheme(
   mode: "light" | "dark" | null,
   imageOutcome: ImageReferenceOutcome,
   imageColors: Rgb[] = [],
+  referenceContent: string | null = null,
 ): Promise<{ manifest: ThemeManifest; checks: ContrastCheck[]; stream: StreamThemeResult }> {
   let bestResult: { manifest: ThemeManifest; checks: ContrastCheck[]; stream: StreamThemeResult } | undefined;
 
@@ -542,7 +558,7 @@ async function generateTheme(
     }
 
     const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: buildSystemPrompt(referenceContent) },
       { role: "user", content: buildUserMessage(prompt + variationNote + imageNote, [], mode, []) },
     ];
 
@@ -600,7 +616,8 @@ DIRECTIONS:
 1. CRITIQUE this design aggressively. Look for muddiness, dull greys, or lack of "pop."
 2. Is it truly high-end and enjoyable to use? If not, fix it.
 3. Fix any contrast failures by shifting the Seed colours.
-4. Output your design thinking followed by the REFINED SeedPalette JSON in a code block.
+4. REFER TO BEST PRACTICES: Ensure the theme meets the high standard defined in the reference manual (e.g. coherent palettes, cross-platform stability, minimal complexity).
+5. Output your design thinking followed by the REFINED SeedPalette JSON in a code block.
 
 FINALIZATION RULE:
 - If and ONLY IF you are 100% satisfied that this theme is a "masterpiece" (perfectly cohesive, rich, and fun), output the token [DESIGN_FINALIZED] followed by the final JSON.
@@ -801,6 +818,7 @@ async function cmdGenerate(rawArgs: string[]): Promise<void> {
   const mode = detectModePreference(opts.prompt);
   const imageOutcome: ImageReferenceOutcome = { requestedCount: opts.images.length, status: opts.images.length > 0 ? "prepared" : "not requested", detail: "" };
 
+  const referenceContent = await loadReferenceContent();
   const results: import("./manifest.js").ThemeProcessingResult[] = [];
   
   let imageColors: Rgb[] = [];
@@ -863,7 +881,7 @@ async function cmdGenerate(rawArgs: string[]): Promise<void> {
   } else {
     for (let vi = 1; vi <= opts.variations; vi++) {
       if (opts.variations > 1) console.log(pc.cyan(`\nGenerating variation ${vi}/${opts.variations}...`));
-      const { manifest, checks, stream } = await generateTheme(provider, opts.prompt, opts, vi, opts.variations, mode, imageOutcome, imageColors);
+      const { manifest, checks, stream } = await generateTheme(provider, opts.prompt, opts, vi, opts.variations, mode, imageOutcome, imageColors, referenceContent);
       const result = await writeThemeArtifacts(provider, manifest, checks, stream, false, "", "", opts);
       results.push(result);
     }
