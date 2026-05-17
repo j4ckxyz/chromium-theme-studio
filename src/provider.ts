@@ -102,7 +102,10 @@ export async function streamThemeManifest(
         printChunk(extractReasoningChunk(reasoningDetails));
       }
 
-      if (typeof content === "string") contentBuffer += content;
+      if (typeof content === "string") {
+        contentBuffer += content;
+        process.stdout.write(content);
+      }
       return false;
     };
 

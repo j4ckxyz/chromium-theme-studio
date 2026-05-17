@@ -576,15 +576,21 @@ async function generateTheme(
         { 
           role: "user", 
           content: [
-            { type: "text", text: "Here is a visual mockup of the theme you just generated. Please critique the aesthetic appeal. If the colours are dull, or if the dark mode is ugly/muddy, fix it. Output a new, finalized SeedPalette JSON." },
+            { type: "text", text: "Here is a visual mockup of the theme you just generated. Please critique the aesthetic appeal. If the colours are dull, or if the dark mode is ugly/muddy, fix it. Output your critique followed by the new, finalized SeedPalette JSON wrapped in ```json blocks." },
             { type: "image_url", image_url: { url: mockUrl } }
           ]
         }
       ];
       
       const refinementStream = await streamThemeManifest(provider, refinementMessages, opts.thinking, true);
+      
+      // The reasoning tokens and content chunks are already being printed by streamThemeManifest
+      process.stdout.write("\n"); // Ensure newline after streaming refinement
+
       try {
-        const refinedSeed = JSON.parse(refinementStream.rawManifest);
+        const jsonMatch = refinementStream.rawManifest.match(/```json\n([\s\S]*?)\n```/) || refinementStream.rawManifest.match(/{[\s\S]*?}/);
+        const jsonStr = jsonMatch ? jsonMatch[1] || jsonMatch[0] : refinementStream.rawManifest;
+        const refinedSeed = JSON.parse(jsonStr);
         if (refinedSeed.base_color && refinedSeed.accent_color && typeof refinedSeed.primary_hue === "number") {
           seed = refinedSeed;
           console.log(pc.green("Theme refined via vision feedback loop."));
