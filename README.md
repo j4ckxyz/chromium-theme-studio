@@ -1,20 +1,18 @@
 # Chromium Theme Studio
 
-**Generate polished browser themes from a text prompt — with any LLM provider**
+**Generate polished, professional browser themes with depth, diversity, and guaranteed accessibility.**
 
-Chromium Theme Studio is a CLI tool that generates Chromium and Firefox browser themes using AI. Give it a description like `"warm sunset, orange and amber, dark background"` and it outputs a complete theme manifest, color-validated and ready to load.
+Chromium Theme Studio is an advanced CLI tool that generates Chromium and Firefox browser themes using AI. Unlike simple color generators, it uses a **Structured Palette Engine** to simulate depth, ensure color harmony, and enforce WCAG contrast compliance.
 
 ---
 
 ## Table of Contents
 
 - [Install](#install)
+- [The Structured Palette Engine](#the-structured-palette-engine)
 - [Make Your First Theme](#make-your-first-theme)
+- [Best Practices (Get the Best Results)](#best-practices)
 - [Commands](#commands)
-- [Providers](#providers)
-- [Config Profiles](#config-profiles)
-- [Examples Catalog](#examples-catalog)
-- [History](#history)
 - [Load Theme in Browser](#load-theme-in-browser)
 
 ---
@@ -27,15 +25,26 @@ cd chromium-theme-studio
 bun install
 ```
 
-Requirements: [Bun](https://bun.sh) (runtime), an API key from any OpenAI-compatible provider
+Requirements: [Bun](https://bun.sh) runtime and an API key from an OpenAI-compatible provider (OpenRouter, Groq, etc.).
+
+---
+
+## The Structured Palette Engine
+
+Current browser themes often feel "flat" or "muddy." This tool solves that by using a multi-stage generation process:
+
+1.  **Seed Generation**: The AI identifies the core "soul" of your prompt (Primary Hue, Base Color, Accent Color).
+2.  **Gradient Simulation**: Our engine generates an internal palette that simulates depth using **Perceptual Stepping** and **Hue Drift** (5–12° shifts) across UI surfaces (Frame → Inactive Frame → Toolbar).
+3.  **Diversity Enforcement**: Unless you ask for monochrome, the engine ensures at least 3 distinct hue families (Neutral, Primary Accent, Environmental Tints).
+4.  **Accessibility Gate**: Every theme passes through a mandatory WCAG contrast check. If a combination (like tab text on a toolbar) fails, the engine **auto-rebalances** the colors locally without losing the theme's vibe.
 
 ---
 
 ## Make Your First Theme
 
-### Step 1: Set Your API Key
+### 1. Set Your API Key
 
-Create a `.ctm.json` file in the project directory with your credentials:
+Create a `.ctm.json` file in the project directory:
 
 ```bash
 cat > .ctm.json << 'EOF'
@@ -49,358 +58,69 @@ cat > .ctm.json << 'EOF'
 EOF
 ```
 
-Then export your key:
-
 ```bash
 export OPENROUTER_API_KEY=sk-or-v1-...
 ```
 
-> **Tip:** You can also pass the key directly via CLI (see [Providers](#providers) below), or copy `config.example.json` to `~/.config/ctm/config.json` for a persistent global setup.
-
-### Step 2: Generate a Theme
+### 2. Generate with Palette Controls
 
 ```bash
-bun run src/index.ts generate "warm sunset, orange and amber, dark background"
+# Default balanced mode
+bun run src/index.ts generate "neon synthwave"
+
+# High-energy vibrant mode
+bun run src/index.ts generate "electric citrus" --palette-mode vibrant
+
+# Minimalist muted mode
+bun run src/index.ts generate "nordic slate" --palette-mode muted
 ```
 
-The CLI will:
-1. Send your prompt to the AI model
-2. Stream the model's reasoning to the terminal
-3. Validate the generated theme colors
-4. Write the theme to a folder
+### 3. See the "Math" behind the Design
 
-You'll see output like:
+Use `--debug-palette` to see the internal mappings and "Material Score":
 
+```bash
+bun run src/index.ts generate "royal velvet" --debug-palette
 ```
-  ╔══════════════════════════════════════════════╗
-  ║      Chromium Theme Studio v2              ║
-  ╚══════════════════════════════════════════════╝
-
-Contrast checks:
-✅ | Tab text on toolbar | 4.2:1 | AA
-✅ | Inactive tab text on frame | 2.8:1 | AA
-✅ | Bookmark text on toolbar | 3.1:1 | AA
-✅ | NTP text on background | 5.4:1 | AAA
-✅ | NTP link on background | 3.2:1 | AA
-
-Color summary:
-  ████  #1a1218  frame
-  ████  #252030  frame_inactive
-  ████  #2a1f22  toolbar
-  ████  #f5e0c0  tab_text
-  ████  #c08060  tab_background_text
-  ████  #e8c090  bookmark_text
-  ████  #120d10  ntp_background
-  ████  #f0e0c8  ntp_text
-  ████  #ff9040  ntp_link
-
-Theme written.
-  ./warm-sunset-2
-  Web store zip: ./warm-sunset-2-webstore.zip
-```
-
-### Step 3: Load It in Your Browser
-
-**Chromium:**
-1. Open `chrome://extensions`
-2. Enable **Developer mode** (top right toggle)
-3. Click **Load unpacked**
-4. Select the `warm-sunset-2` folder
-
-**Firefox:**
-1. Open `about:debugging`
-2. Click **This Firefox**
-3. Click **Load Temporary Add-on**
-4. Select `warm-sunset-2/firefox-manifest.json`
 
 ---
 
-## More Examples
+## Best Practices
 
-### Name Your Theme
+To get "Designed" results rather than "Averaged" results, follow these tips:
 
-```bash
-bun run src/index.ts generate "ocean waves, teal and white" --name "Ocean Drift"
-```
+### ✅ DO:
+*   **Use Emotional Keywords**: Instead of "blue and grey," try "melancholic winter," "clinical laboratory," or "energizing sunrise."
+*   **Specify Materials**: Use words like "frosted glass," "brushed aluminum," "velvet," or "ink."
+*   **Use Palette Modes**: If your prompt is "rainbow," use `--palette-mode vibrant`. If it's "minimalist," use `--palette-mode muted`.
+*   **Use Image References**: The `-i` flag now extracts **semantic regions** (shadows, midtones, accents) rather than just the average color.
 
-This creates a folder called `ocean-drift/` instead of auto-generating a name.
+### ❌ DON'T:
+*   **Don't over-specify hex codes**: The AI is better at picking harmonies than humans are at guessing hex values. Let the AI pick the "Seed" and the engine will handle the "Depth."
+*   **Don't worry about contrast in your prompt**: The engine's **Accessibility Gate** will fix it for you. Focus on the *vibe*.
+*   **Don't use generic prompts**: "a nice theme" will give you a generic result. "Cyberpunk 2077 Night City, rain-slicked asphalt, pink neon reflections" will give you a masterpiece.
 
-### Generate Multiple Variations
+### Examples
 
-Want 4 different takes on the same idea? Use `-v`:
-
-```bash
-bun run src/index.ts generate "electric candy, neon on dark" -v 4 --preview-sheet
-```
-
-This generates 4 candidate themes and writes an HTML preview sheet at `previews/`.
-
-### Add Web Store Assets
-
-Want a Chrome Web Store-ready icon, zip, and listing draft? Add `-w`:
-
-```bash
-bun run src/index.ts generate "midnight forest, deep green" -w
-```
-
-Outputs:
-- `midnight-forest/icon-128.png` — gradient icon
-- `midnight-forest-webstore.zip` — ready to upload
-- `descriptions/midnight-forest.md` — listing copy
-
-### Specify Colors Directly
-
-Pass exact hex colors without using the AI. The CLI auto-generates all other colors based on your inputs:
-
-```bash
-# Set just the frame color — everything else is derived
-bun run src/index.ts generate --color.frame=#2d1f3d --name "My Theme"
-
-# Set multiple specific colors
-bun run src/index.ts generate \
-  --color.frame=#1a0f28 \
-  --color.toolbar=#251735 \
-  --color.ntp-link=#ff6633 \
-  --name "Dark Ember"
-```
-
-
-No API call needed — fast, predictable, free.
-
-
-#### Available Color Flags
-
-| Flag | Aliases | Description |
+| Goal | Prompt | Flags |
 |---|---|---|
-| `--color.frame` | `#rrggbb` or `rgb(r,g,b)` | Window/frame background |
-| `--color.frame-inactive` | | Inactive frame (auto-derived if not set) |
-| `--color.toolbar` | | Toolbar color |
-| `--color.tab-text` | | Active tab text |
-| `--color.tab-background-text` | | Inactive tab text |
-| `--color.bookmark-text` | | Bookmark text |
-| `--color.ntp-background` | | New tab page background |
-| `--color.ntp-text` | | New tab page text |
-| `--color.ntp-link` | | New tab page link accent |
-| `--color.button-background` | | Button background |
-| `--color.buttons` | | Tint as `h,s,l` values -1 to 1 |
-| `--color.tint-frame` | | Frame tint |
-| `--color.tint-frame-inactive` | | Inactive frame tint |
-
-Short form: `-c.frame=#rrggbb`
-
-#### Auto-Derivation
-
-If you only set `--color.frame`, the CLI automatically computes:
-- **frame_inactive** — slightly lighter version of frame
-- **toolbar** — same as frame
-- **tab_text / ntp_text** — light text on dark frame, dark text on light frame
-- **ntp_background** — darker (dark mode) or lighter (light mode) than frame
-- **ntp_link** — blue accent on dark, warm blue on light
-- **tints** — sensible defaults for icon color shifting
-
-### Include a Reference Image
-
-Pass a local file or URL to extract colors from:
-
-```bash
-bun run src/index.ts generate "the mood of this photo" -i ./sunset.jpg
-```
-
-### Re-process an Existing Theme
-
-Modify an already-generated theme without regenerating colors:
-
-```bash
-bun run src/index.ts generate -f ./my-theme --name "My Theme Updated" -w
-```
-
-This re-runs the web store packaging and adds Firefox manifest.
-
-### Use a Different Model
-
-```bash
-bun run src/index.ts generate "minimal monochrome" --provider-model gpt-4o
-```
-
-Or use a saved profile:
-
-```bash
-bun run src/index.ts generate "fast and cheap" -P groq
-```
-
-### Enable Thinking Mode
-
-Some models support reasoning. Enable it with `--thinking`:
-
-```bash
-bun run src/index.ts generate "retro synthwave" --thinking=high
-```
-
-Supported levels: `xhigh`, `high`, `medium`, `low`, `minimal`, `none`, `off`.
+| **Professional** | "High-end obsidian luxury, gold accents, dark" | `--palette-mode balanced` |
+| **Playful** | "Strawberry bubblegum and mint sorbet" | `--palette-mode vibrant` |
+| **Focus** | "Focus mode, zen garden, stone and moss" | `--palette-mode muted` |
+| **Dynamic** | "Deep space nebula, cosmic dust, violet" | `-v 4 --preview-sheet` |
 
 ---
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `ctm generate "prompt..."` | Generate one or more themes |
-| `ctm examples` | Browse example themes with exact regeneration commands |
-| `ctm history` | View your generation history |
-| `ctm config` | Manage provider profiles |
-| `ctm -h` | Show help |
-
-### Generate Options
-
 | Flag | Description |
 |---|---|
-| `-n, --name <name>` | Set output folder and theme name |
-| `-v, --variations <n>` | Generate 1–12 variations in one run |
-| `-w, --web-store` | Generate Chrome Web Store icon, zip, and listing drafts |
-| `-s, --screenshots` | Capture browser screenshots (macOS only) |
-| `-p, --preview-sheet` | Write HTML comparison sheet for all variations |
-| `-F, --firefox` | Also generate a Firefox WebExtension manifest |
-| `-i, --image <path>` | Reference image for palette inspiration |
-| `-f, --from <path>` | Re-process an existing theme folder |
-| `--thinking[=<level>]` | Enable reasoning (xhigh/high/medium/low/minimal/none/off) |
-| `-P, --profile <name>` | Use a saved provider profile |
-| `--provider-url <url>` | API base URL |
-| `--provider-key <key>` | API key |
-| `--provider-model <model>` | Model ID |
-
----
-
-## Providers
-
-Chromium Theme Studio works with any **OpenAI-compatible API**. Set credentials in any of these ways:
-
-### Option 1: Environment Variables
-
-```bash
-export OPENROUTER_API_KEY=sk-or-v1-...
-export OPENROUTER_MODEL=anthropic/claude-3.7-sonnet
-```
-
-### Option 2: Config File
-
-Copy the example and edit:
-
-```bash
-cp config.example.json ~/.config/ctm/config.json
-```
-
-Then edit `~/.config/ctm/config.json`. The `key` field supports `env:VARNAME` syntax to reference env vars without hardcoding secrets.
-
-### Option 3: CLI Flags (per-run)
-
-```bash
-bun run src/index.ts generate "my theme" \
-  --provider-url https://api.groq.com/openai/v1 \
-  --provider-key $GROQ_API_KEY \
-  --provider-model llama-3.3-70b-versatile
-```
-
-### Provider Quick Reference
-
-| Provider | URL | Model Example | Env Var |
-|---|---|---|---|
-| OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-3.7-sonnet` | `OPENROUTER_API_KEY` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o` | `OPENAI_API_KEY` |
-| Azure OpenAI | `https://YOUR_RESOURCE.openai.azure.com/v1` | `gpt-4o` | `AZURE_OPENAI_KEY` |
-| Ollama | `http://localhost:11434/v1` | `llama3` | `OLLAMA_API_KEY` |
-| Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
-| Anthropic Bedrock | `https://bedrock-runtime.us-east-1.amazonaws.com/...` | `anthropic.claude-3-7-sonnet-...` | `AWS_ACCESS_KEY_ID` |
-| Vertex AI | `https://us-central1-aiplatform.googleapis.com/...` | `claude-3-7-sonnet@...` | `VERTEX_AI_TOKEN` |
-
----
-
-## Config Profiles
-
-Save provider configurations and switch between them quickly.
-
-```bash
-# Add a profile
-ctm config --add groq \
-  --url https://api.groq.com/openai/v1 \
-  --key $GROQ_API_KEY \
-  --model llama-3.3-70b-versatile \
-  --default
-
-# Use it
-bun run src/index.ts generate "my theme" -P groq
-```
-
-### Config File Locations
-
-- **Local:** `.ctm.json` (in project directory — overrides global)
-- **Global:** `~/.config/ctm/config.json`
-
----
-
-## Examples Catalog
-
-See real themes with the exact commands used to generate them.
-
-```bash
-# List all examples
-bun run src/index.ts examples
-
-# By name
-bun run src/index.ts examples electric-zest
-
-# By tag
-bun run src/index.ts examples dark
-bun run src/index.ts examples warm
-```
-
-### Available Examples
-
-| Slug | Description | Tags |
-|---|---|---|
-| `obsidian-dusk` | Deep dark theme with purple undertones | dark, purple, cool |
-| `morning-linen` | Soft warm light theme with cream tones | light, warm, minimal |
-| `electric-zest` | Vibrant neon citrus on dark graphite | dark, neon, colorful |
-| `midnight-meadow` | Forest greens and earth tones | dark, green, nature |
-| `velvet-ember` | Rich burgundy and burnt orange | dark, warm, red |
-| `prismatic-celebration` | Rainbow pride theme | light, rainbow, colorful |
-| `sour-sorbet` | Sharp pink and mint contrast | light, pink, fresh |
-| `coastal-dawn` | Teal water and peach clouds | light, blue, warm |
-
----
-
-## History
-
-Every generation is logged. Track what you've made, which models performed best, and costs.
-
-```bash
-# Recent themes
-ctm history
-
-# Statistics
-ctm history --stats
-
-# Search
-ctm history --search sunset --limit 20
-```
-
----
-
-## Load Theme in Browser
-
-### Chromium
-
-1. Open `chrome://extensions`
-2. Enable **Developer mode** (top right)
-3. Click **Load unpacked**
-4. Select the generated theme folder
-
-### Firefox
-
-1. Open `about:debugging`
-2. Click **This Firefox**
-3. Click **Load Temporary Add-on**
-4. Select `firefox-manifest.json` in the theme folder
+| `--palette-mode <m>` | `balanced` (default), `vibrant`, `muted`, `monochrome` |
+| `--debug-palette` | Show internal palette mapping, material scores, and contrast results |
+| `-i, --image <path>` | Extract semantic colors (shadows, midtones, highlights, accents) |
+| `-v, --variations <n>` | Generate 1–12 unique variations of the same prompt |
+| `-w, --web-store` | Generate Chrome Web Store icons and listing drafts |
+| `-F, --firefox` | Generate a Firefox WebExtension manifest |
 
 ---
 
@@ -408,28 +128,23 @@ ctm history --search sunset --limit 20
 
 ```
 src/
-  index.ts       # CLI — all commands (generate, examples, history, config)
-  config.ts      # Config loading, profile resolution, env var support
-  manifest.ts    # Theme types, validation, color utilities
-  provider.ts    # OpenAI-compatible API calls with streaming
-  examples.ts    # Example catalog with commands
-  history.ts     # JSON-based history store
-
-config.example.json    # Example config with all provider presets
+  palette.ts         # The Structured Palette Engine (Logic & Math)
+  image-extractor.ts # Semantic image analysis (using pngjs)
+  manifest.ts        # Theme validation & HSL/RGB conversion helpers
+  index.ts           # CLI & LLM Prompt Orchestration
+  provider.ts        # OpenAI-compatible API bridge
 ```
 
 ---
 
 ## Troubleshooting
 
-**"Missing OPENROUTER_API_KEY"**
-Set your API key: `export OPENROUTER_API_KEY=sk-or-...` or add it to `.ctm.json`.
+**Theme looks "flat"?**
+Try a different `--palette-mode`. `vibrant` increases hue drift, while `balanced` focuses on smooth luminance steps.
 
-**"Model not found"**
-Check the model name. For OpenRouter, use the full ID like `anthropic/claude-3.7-sonnet`. For Groq, try `llama-3.3-70b-versatile`.
+**Colors didn't match my image perfectly?**
+The tool extracts colors as *inspiration* for the Seed. It then builds a design-compliant palette around them to ensure the theme works in a real browser.
 
-**Theme looks wrong in the browser**
-Chromium caches themes aggressively. After loading, open `chrome://settings/appearance` and switch to a different theme, then back to yours.
-
-**Contrast checks failing**
-The CLI retries automatically up to 2 times with accessibility-focused feedback. If checks still fail, the theme is still written — you can iterate with `--from` to tweak it.
+**Contrast is too high/low?**
+The engine targets WCAG AA. If you need something specific, you can use the direct color flags:
+`ctm generate --color.frame=#000000 --color.tab-text=#ffffff`
