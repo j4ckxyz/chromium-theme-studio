@@ -57,8 +57,15 @@ export function generatePalette(seed: PaletteSeed): InternalPalette {
 }
 
 export function mapPaletteToManifest(name: string, palette: InternalPalette): ThemeManifest {
-  const isDark = rgbToHsl(...palette.base_dark)[2] < 50;
+  const [h, s, l] = rgbToHsl(...palette.base_dark);
+  const isDark = l < 50;
   
+  // Inactive tab text must be high-contrast against the frame (base_dark)
+  // We use a high-contrast tinted white or black
+  const tab_background_text = isDark 
+    ? hslToRgb(h, Math.min(10, s), 85) // Light tinted grey
+    : hslToRgb(h, Math.min(10, s), 15); // Dark tinted grey
+
   return {
     manifest_version: 3,
     name: name || "Generated Theme",
@@ -69,7 +76,7 @@ export function mapPaletteToManifest(name: string, palette: InternalPalette): Th
         frame_inactive: palette.base_mid,
         toolbar: palette.surface_tint_1,
         tab_text: palette.base_light,
-        tab_background_text: palette.base_mid,
+        tab_background_text,
         bookmark_text: palette.base_light,
         ntp_background: palette.base_dark,
         ntp_text: palette.base_light,

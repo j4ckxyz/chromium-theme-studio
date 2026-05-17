@@ -101,6 +101,7 @@ AESTHETIC GOALS:
 - MODE AWARENESS: 
   - Dark modes: Use rich, deep, beautiful dark tones (deep navy, charcoal, rich plum, forest shadow).
   - Light modes: Use soft, warm, or crisp tinted linens/slates.
+- LEGIBILITY: Inactive tab text (tab_background_text) MUST be high-contrast (near-white or near-black) to ensure readability against the frame.
 
 OUTPUT STRUCTURE — follow exactly:
 {
