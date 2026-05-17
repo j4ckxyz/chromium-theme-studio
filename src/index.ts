@@ -5,6 +5,7 @@ import { PNG } from "pngjs";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import pc from "picocolors";
+import { Resvg } from "@resvg/resvg-js";
 
 import {
   loadConfig, getProviderFromConfig, parseThinkingValue,
@@ -480,7 +481,7 @@ function generateMockBrowserSvg(manifest: ThemeManifest): string {
   const ntpBg = rgbToHex(c.ntp_background);
   const ntpLink = rgbToHex(c.ntp_link);
 
-  const svg = `
+  return `
 <svg width="800" height="600" viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
   <!-- Window Frame -->
   <rect width="800" height="600" fill="${frame}" />
@@ -509,9 +510,6 @@ function generateMockBrowserSvg(manifest: ThemeManifest): string {
   <text x="400" y="320" font-family="sans-serif" font-size="24" fill="${ntpLink}" text-anchor="middle" font-weight="bold">New Tab Page</text>
 </svg>
 `.trim();
-
-  const base64 = Buffer.from(svg).toString("base64");
-  return `data:image/svg+xml;base64,${base64}`;
 }
 
 async function generateTheme(
@@ -566,7 +564,11 @@ async function generateTheme(
       intermediatePalette = rebalancePalette(intermediatePalette);
       const intermediateManifest = mapPaletteToManifest(opts.name ?? normalizeGeneratedName(seed.name), intermediatePalette);
       
-      const mockUrl = generateMockBrowserSvg(intermediateManifest);
+      const svg = generateMockBrowserSvg(intermediateManifest);
+      const resvg = new Resvg(svg, { background: "white", fitTo: { mode: "width", value: 800 } });
+      const pngData = resvg.render();
+      const pngBuffer = pngData.asPng();
+      const mockUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
       
       const refinementMessages: ChatMessage[] = [
         ...messages,
