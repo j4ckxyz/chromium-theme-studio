@@ -9,7 +9,14 @@ export type ImagePalette = {
 };
 
 export async function extractSemanticColors(imagePath: string): Promise<ImagePalette> {
-  const bytes = await Bun.file(imagePath).arrayBuffer();
+  let bytes: ArrayBuffer;
+  if (imagePath.startsWith("http://") || imagePath.startsWith("https://")) {
+    const resp = await fetch(imagePath);
+    if (!resp.ok) throw new Error(`Failed to fetch image: ${resp.statusText}`);
+    bytes = await resp.arrayBuffer();
+  } else {
+    bytes = await Bun.file(imagePath).arrayBuffer();
+  }
   const png = PNG.sync.read(Buffer.from(bytes));
   
   const shadows: Rgb[] = [];

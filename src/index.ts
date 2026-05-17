@@ -579,7 +579,7 @@ async function generateTheme(
     if (canUseVision) {
       console.log(pc.cyan("Model supports vision. Entering design refinement..."));
       
-      const maxIter = opts.iterate ? 15 : 1;
+      const maxIter = opts.iterate ? 5 : 1;
       const history: ChatMessage[] = [...messages, { role: "assistant", content: stream.rawManifest }];
 
       for (let iter = 1; iter <= maxIter; iter++) {
@@ -600,7 +600,7 @@ async function generateTheme(
         const materialScore = computeMaterialScore(palette);
         
         const refinementPrompt = `
-Visual Mockup (Iteration ${iter}):
+Visual Mockup (Iteration ${iter} of ${maxIter}):
 [See attached image]
 
 Contrast Results:
@@ -613,11 +613,12 @@ Material Consistency Scores:
 - TOTAL: ${materialScore.total.toFixed(2)}
 
 DIRECTIONS:
-1. CRITIQUE this design aggressively. Look for muddiness, dull greys, or lack of "pop."
-2. Is it truly high-end and enjoyable to use? If not, fix it.
-3. Fix any contrast failures by shifting the Seed colours.
-4. REFER TO BEST PRACTICES: Ensure the theme meets the high standard defined in the reference manual (e.g. coherent palettes, cross-platform stability, minimal complexity).
-5. Output your design thinking followed by the REFINED SeedPalette JSON in a code block.
+1. BE DECISIVE: You only have ${maxIter} iterations to reach perfection. Don't make micro-adjustments; if it's muddy, fix it boldly.
+2. CRITIQUE aggressively: Look for muddiness, "computed-looking" greys, or lack of "pop."
+3. FIX CONTRAST: If you see red "❌" above, you MUST shift your Seed colours (base or accent) until the math works.
+4. BEST PRACTICES: Follow the REFERENCE manual strictly. Use rich, tinted neutrals.
+5. If the current design is a "Masterpiece", output [DESIGN_FINALIZED] followed by the JSON.
+6. Otherwise, output your critique and the REFINED SeedPalette JSON in a code block.`;
 
 FINALIZATION RULE:
 - If and ONLY IF you are 100% satisfied that this theme is a "masterpiece" (perfectly cohesive, rich, and fun), output the token [DESIGN_FINALIZED] followed by the final JSON.
